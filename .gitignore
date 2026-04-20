@@ -1,0 +1,55 @@
+# ── Virtual environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Distribution / build ──────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Data files (never commit raw fleet data) ──────────────────────────────────
+*.xls
+*.xlsx
+*.csv
+*.xlsm
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+DS/
+
+# ── Input data (raw Excel — keep folder, ignore contents) ────────────────────
+input/*
+!input/.gitkeep
+
+# ── Output data (generated CSVs — keep folder, ignore contents) ──────────────
+output/*
+!output/.gitkeep
+
+# ── OS noise ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editors ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
