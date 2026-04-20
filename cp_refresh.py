@@ -77,6 +77,9 @@ def main():
     if not records:
         return
 
+    import dns.resolver
+    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+    dns.resolver.default_resolver.nameservers = ['8.8.8.8']
     client = MongoClient(uri)
     db = client[db_name]
 
