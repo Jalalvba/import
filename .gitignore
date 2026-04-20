@@ -53,3 +53,5 @@ desktop.ini
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
+.env.production
+.env.development
