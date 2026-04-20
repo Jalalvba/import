@@ -88,7 +88,7 @@ def main():
     year = int(sys.argv[1]) if len(sys.argv) > 1 else datetime.now().year
 
     # Load .env from ~/avis/.env
-    env_path = Path.home() / "avis" / ".env"
+    env_path = Path(__file__).parent / ".env"
     load_dotenv(dotenv_path=env_path)
 
     uri     = os.getenv("MONGODB_URI")

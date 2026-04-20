@@ -64,7 +64,7 @@ def extract() -> list[dict]:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    env_path = Path.home() / "avis" / ".env"
+    env_path = Path(__file__).parent / ".env"
     load_dotenv(dotenv_path=env_path)
 
     uri     = os.getenv("MONGODB_URI")
