@@ -92,6 +92,13 @@ def main():
     db[COLLECTION].insert_many(records)
     print(f"  ✅ Inserted {len(records)} records into {COLLECTION}", flush=True)
 
+    # drop() above wipes all non-_id indexes — recreate them every reload.
+    # create_index() is idempotent (safe no-op if already present under the same name).
+    db[COLLECTION].create_index([("Immatriculation", 1)], name="immatriculation")
+    db[COLLECTION].create_index([("Numéro WW", 1)], name="numero_ww")
+    db[COLLECTION].create_index([("N° de chassis", 1)], name="n_de_chassis")
+    print(f"  🔧 Recreated indexes on {COLLECTION}: immatriculation, numero_ww, n_de_chassis", flush=True)
+
     after_count = db[COLLECTION].count_documents({})
     diff = after_count - before_count
     diff_str = f"+{diff}" if diff > 0 else str(diff)

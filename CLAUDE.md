@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Place raw Excel files in `~/avis/input/` before running.
+Place raw Excel files in `input/` (relative to the repo root — all path handling is `Path(__file__).parent`-based, not a hardcoded home-directory path, despite what some in-file docstrings say) before running.
 
 ### Step 1 — Convert Excel → CSV
 
@@ -40,6 +40,16 @@ python ds_csv.py && python ds_refresh.py
 python cp_csv.py && python cp_refresh.py
 python parc_csv.py && python parc_refresh.py
 ```
+
+`bc_csv.py` has no corresponding `bc_refresh.py` yet — its output is generated but not currently pushed to MongoDB.
+
+### Orchestrator
+
+```bash
+python run.py
+```
+
+Scans `input/` for any of the four known filenames and runs the matching csv → refresh pipeline for each one found, skipping pipelines whose input file is absent (and skipping the refresh step for `bc_csv.py`, since none exists). Stops a given pipeline's remaining steps if one script fails, but continues with other pipelines.
 
 There are no tests, linters, or CI configured.
 
@@ -77,8 +87,11 @@ All refresh scripts print before/after record counts and the diff.
 
 ## Data & File Paths
 
+All paths below are relative to the repo root (wherever this project is checked out) — nothing is hardcoded to a fixed home-directory location, though older docstrings in some scripts still reference a prior `~/avis/` path from before the project was renamed.
+
 ```
-~/avis/
+./
+├── run.py                  # orchestrator: detects input files, runs full pipeline per file
 ├── input/                  # gitignored — place raw Excel files here
 │   ├── .gitkeep
 │   ├── YFACSCALDS.xlsx
