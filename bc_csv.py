@@ -2,10 +2,10 @@
 """
 bc_csv.py
 ---------
-Reads ~/avis/input/YBONTEC.xlsx,
-extracts needed columns, cleans and normalizes all fields,
-renames N° BC → CMD Num,
-outputs ~/avis/output/bc.csv ready for MongoDB Compass.
+Reads input/YBONTEC.xlsx (relative to this file's directory, via
+Path(__file__).parent), extracts needed columns, cleans and normalizes
+all fields, renames N° BC → CMD Num,
+outputs output/bc.csv ready for MongoDB Compass.
 
 Usage:
     python bc_csv.py

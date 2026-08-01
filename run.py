@@ -2,7 +2,8 @@
 """
 run.py
 ------
-Auto-detects which Excel files are present in ~/avis/input/
+Auto-detects which Excel files are present in input/ (relative to this
+file's directory, via Path(__file__).parent)
 and runs the full pipeline (csv + refresh) for each one found.
 
 Pipelines:
@@ -72,7 +73,7 @@ def main():
 
     if not found:
         print("❌ No Excel files found in input/")
-        print("   Place one or more of these files in ~/avis/input/:")
+        print("   Place one or more of these files in input/:")
         for p in PIPELINES:
             print(f"   - {p['input']}")
         return

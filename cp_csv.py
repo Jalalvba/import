@@ -2,10 +2,11 @@
 """
 cp_csv.py
 ---------
-Reads ~/avis/input/ConditionParticulieres.xls,
-extracts needed columns, cleans and normalizes all fields,
-deduplicates by IMM keeping the row with the latest Date fin contrat,
-outputs ~/avis/output/cp.csv ready for MongoDB Compass.
+Reads input/ConditionParticulieres.xls (relative to this file's directory,
+via Path(__file__).parent), extracts needed columns, cleans and
+normalizes all fields, deduplicates by IMM keeping the row with the
+latest Date fin contrat,
+outputs output/cp.csv ready for MongoDB Compass.
 
 Usage:
     python cp_csv.py

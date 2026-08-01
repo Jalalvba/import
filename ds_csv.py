@@ -2,9 +2,9 @@
 """
 ds_csv.py
 ---------
-Reads ~/avis/input/YFACSCALDS.xlsx,
-cleans and normalizes all fields,
-outputs ~/avis/output/ds.csv ready for MongoDB Compass.
+Reads input/YFACSCALDS.xlsx (relative to this file's directory, via
+Path(__file__).parent), cleans and normalizes all fields,
+outputs output/ds.csv ready for MongoDB Compass.
 
 Usage:
     python ds_csv.py

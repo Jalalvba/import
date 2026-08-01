@@ -2,9 +2,10 @@
 """
 parc_csv.py
 -----------
-Reads ~/avis/input/Fullparcs.xls,
-extracts needed columns, cleans and normalizes all fields,
-outputs ~/avis/output/parc.csv ready for MongoDB Compass.
+Reads input/Fullparcs.xls (relative to this file's directory, via
+Path(__file__).parent), extracts needed columns, cleans and normalizes
+all fields,
+outputs output/parc.csv ready for MongoDB Compass.
 
 Usage:
     python parc_csv.py
