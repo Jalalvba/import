@@ -66,7 +66,7 @@ def format_date(val):
             return datetime.strptime(s, fmt).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         except ValueError:
             continue
-    return s
+    return ""
 
 
 def parse_date_for_sort(val):
