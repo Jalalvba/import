@@ -2,8 +2,11 @@
 """
 cp_refresh.py
 -------------
-Reads ~/avis/output/cp.csv  (output of cp_csv.py — already clean)
-Drops the cp collection in Atlas and reloads it entirely.
+Reads output/cp.csv (relative to this file's directory, via
+Path(__file__).parent — output of cp_csv.py, already clean).
+Reloads the cp collection in Atlas entirely, via a staged insert +
+atomic rename so the live collection is never dropped before the
+replacement data is fully written and verified.
 
 Flow:
     ConditionParticulieres.xls → cp_csv.py → cp.csv → cp_refresh.py → Atlas
@@ -15,18 +18,25 @@ Requirements:
     pip install pandas pymongo python-dotenv
 """
 
+import sys
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
 import os
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 # ── Config ────────────────────────────────────────────────────────────────────
 INPUT_CSV  = Path(__file__).parent / "output" / "cp.csv"
 COLLECTION = "cp"
 
 DATE_COLUMNS = ["Date MCE", "Date début contrat", "Date fin contrat"]
+
+INDEX_SPECS = [
+    ([("IMM", 1)], "imm"),
+    ([("WW", 1)], "ww"),
+]
 
 
 # ── Extract ───────────────────────────────────────────────────────────────────
@@ -62,6 +72,31 @@ def extract() -> list[dict]:
     return clean_records
 
 
+# ── Load ──────────────────────────────────────────────────────────────────────
+def atomic_reload(db, collection_name: str, records: list[dict], index_specs) -> None:
+    """Insert records into a staging collection, verify the count, then
+    atomically rename staging → collection_name (dropTarget=True). The live
+    collection is never dropped before the replacement data is fully
+    written and verified. On any failure the staging collection is dropped
+    and the live collection is left untouched."""
+    staging_name = f"{collection_name}_staging"
+    db[staging_name].drop()
+    try:
+        if records:
+            db[staging_name].insert_many(records)
+        staged_count = db[staging_name].count_documents({})
+        if staged_count != len(records):
+            raise RuntimeError(
+                f"staging insert count mismatch: expected {len(records)}, got {staged_count}"
+            )
+        for keys, name in index_specs:
+            db[staging_name].create_index(keys, name=name)
+        db[staging_name].rename(collection_name, dropTarget=True)
+    except Exception:
+        db[staging_name].drop()
+        raise
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     env_path = Path(__file__).parent / ".env"
@@ -86,16 +121,14 @@ def main():
     before_count = db[COLLECTION].count_documents({})
     print(f"  📊 Records in Atlas before refresh: {before_count}", flush=True)
 
-    db[COLLECTION].drop()
-    print(f"  🗑️  Dropped collection: {COLLECTION}", flush=True)
+    try:
+        atomic_reload(db, COLLECTION, records, INDEX_SPECS)
+    except (PyMongoError, RuntimeError) as e:
+        print(f"  ❌ Refresh failed — '{COLLECTION}' left untouched: {e}", flush=True)
+        client.close()
+        sys.exit(1)
 
-    db[COLLECTION].insert_many(records)
-    print(f"  ✅ Inserted {len(records)} records into {COLLECTION}", flush=True)
-
-    # drop() above wipes all non-_id indexes — recreate them every reload.
-    # create_index() is idempotent (safe no-op if already present under the same name).
-    db[COLLECTION].create_index([("IMM", 1)], name="imm")
-    db[COLLECTION].create_index([("WW", 1)], name="ww")
+    print(f"  ✅ Inserted {len(records)} records into {COLLECTION} (staged + swapped)", flush=True)
     print(f"  🔧 Recreated indexes on {COLLECTION}: imm, ww", flush=True)
 
     after_count = db[COLLECTION].count_documents({})
