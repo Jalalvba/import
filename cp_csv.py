@@ -128,8 +128,7 @@ def main():
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
     missing = [c for c in needed_stripped if c not in df.columns]
     if missing:
-        print(f"❌ Missing columns: {missing}")
-        return
+        raise ValueError(f"Missing columns: {missing}")
 
     df = df[needed_stripped].copy()
 
