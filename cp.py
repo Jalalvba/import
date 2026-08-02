@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """
-cp_csv.py
----------
-Reads input/ConditionParticulieres.xls (relative to this file's directory,
+cp.py
+-----
+End-to-end CP (contract particulars) pipeline: reads
+input/ConditionParticulieres.xls (relative to this file's directory,
 via Path(__file__).parent), extracts needed columns, cleans and
 normalizes all fields, deduplicates by IMM keeping the row with the
-latest Date fin contrat,
-outputs output/cp.csv ready for MongoDB Compass.
+latest Date fin contrat, writes output/cp.csv, then pushes a full
+atomic reload to the `cp` MongoDB collection.
 
 Usage:
-    python cp_csv.py
+    python cp.py
 
 Requirements:
-    pip install pandas openpyxl python-calamine
+    pip install pandas openpyxl python-calamine pymongo python-dotenv
 """
 
-import math
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from pymongo.errors import PyMongoError
+
+from lib.transform import CP_PARC_FORMATS, clean_val, format_date
+from lib.validate import validate_columns
+from lib.mongo import atomic_reload, get_mongo_db, log_refresh_counts
 
 INPUT_DIR  = Path(__file__).parent / "input"
 OUTPUT_DIR = Path(__file__).parent / "output"
 INPUT_FILE = INPUT_DIR / "ConditionParticulieres.xls"
 OUTPUT_CSV = OUTPUT_DIR / "cp.csv"
+COLLECTION = "cp"
 
 HEADER_ROW = 7
 
@@ -47,26 +54,10 @@ COLUMNS_NEEDED = [
 
 DATE_COLUMNS = ["Date MCE", "Date début contrat", "Date fin contrat"]
 
-
-def format_date(val):
-    if val is None:
-        return ""
-    try:
-        if isinstance(val, datetime):
-            return val.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        if pd.isnull(val):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    s = str(val).strip()
-    if not s:
-        return ""
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        except ValueError:
-            continue
-    return ""
+INDEX_SPECS = [
+    ([("IMM", 1)], "imm"),
+    ([("WW", 1)], "ww"),
+]
 
 
 def parse_date_for_sort(val):
@@ -81,7 +72,7 @@ def parse_date_for_sort(val):
     except (TypeError, ValueError):
         pass
     s = str(val).strip()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S"):
+    for fmt in CP_PARC_FORMATS:
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -89,47 +80,17 @@ def parse_date_for_sort(val):
     return datetime.min
 
 
-def clean_val(val):
-    if val is None:
-        return ""
-    try:
-        if pd.isnull(val):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    if isinstance(val, float):
-        if math.isnan(val) or math.isinf(val):
-            return ""
-        if val == int(val):
-            return str(int(val))
-        return str(val)
-    if isinstance(val, int):
-        return str(val)
-    if isinstance(val, datetime):
-        return val.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    s = str(val)
-    s = s.replace("_x000a_", " ").replace("_x000d_", " ")
-    s = s.replace("_x000A_", " ").replace("_x000D_", " ")
-    s = re.sub(r"_x[0-9A-Fa-f]{4}_", " ", s)
-    s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    s = s.replace("\xa0", " ")
-    s = re.sub(r" +", " ", s)
-    return s.strip()
-
-
-def main():
+# ── Excel → CSV ───────────────────────────────────────────────────────────────
+def extract_transform() -> pd.DataFrame:
     if not INPUT_FILE.exists():
-        print(f"❌ File not found: {INPUT_FILE}")
-        return
+        raise FileNotFoundError(f"❌ File not found: {INPUT_FILE}")
 
     print(f"  Reading: {INPUT_FILE.name}", flush=True)
     df = pd.read_excel(INPUT_FILE, engine="calamine", header=HEADER_ROW)
     df.columns = [c.strip() for c in df.columns]
 
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
-    missing = [c for c in needed_stripped if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns: {missing}")
+    validate_columns(df, needed_stripped)
 
     df = df[needed_stripped].copy()
 
@@ -169,19 +130,84 @@ def main():
 
     print(f"  → {len(df)} unique IMM rows after dedup", flush=True)
 
-    # Format date columns → ISO string
     for col in [c.strip() for c in DATE_COLUMNS]:
         if col in df.columns:
-            df[col] = df[col].apply(format_date)
+            df[col] = df[col].apply(lambda v: format_date(v, CP_PARC_FORMATS))
 
-    # Clean all other columns
     for col in df.columns:
         if col not in [c.strip() for c in DATE_COLUMNS]:
             df[col] = df[col].apply(clean_val)
 
+    return df
+
+
+def write_csv(df: pd.DataFrame) -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     print(f"✅ {len(df)} rows → {OUTPUT_CSV}")
+
+
+# ── CSV → Mongo ───────────────────────────────────────────────────────────────
+def extract_mongo_records() -> list[dict]:
+    if not OUTPUT_CSV.exists():
+        raise FileNotFoundError(f"❌ File not found: {OUTPUT_CSV}\n   CSV step must run first.")
+
+    df = pd.read_csv(OUTPUT_CSV, dtype=str)
+    df.columns = [c.strip() for c in df.columns]
+
+    for col in DATE_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
+
+    records = df.to_dict(orient="records")
+
+    clean_records = []
+    for rec in records:
+        doc = {}
+        for k, v in rec.items():
+            if k in DATE_COLUMNS:
+                doc[k] = v.to_pydatetime() if pd.notna(v) else None
+            else:
+                if pd.isna(v) or str(v).strip() == "":
+                    continue
+                doc[k] = str(v).strip()
+        clean_records.append(doc)
+
+    print(f"  → {len(clean_records)} records", flush=True)
+    return clean_records
+
+
+def push_to_mongo() -> None:
+    records = extract_mongo_records()
+    if not records:
+        return
+
+    db = get_mongo_db()
+
+    before_count = db[COLLECTION].count_documents({})
+    print(f"  📊 Records in Atlas before refresh: {before_count}", flush=True)
+
+    try:
+        atomic_reload(db, COLLECTION, records, INDEX_SPECS)
+    except (PyMongoError, RuntimeError) as e:
+        print(f"  ❌ Refresh failed — '{COLLECTION}' left untouched: {e}", flush=True)
+        db.client.close()
+        sys.exit(1)
+
+    print(f"  ✅ Inserted {len(records)} records into {COLLECTION} (staged + swapped)", flush=True)
+    print(f"  🔧 Recreated indexes on {COLLECTION}: imm, ww", flush=True)
+
+    after_count = db[COLLECTION].count_documents({})
+    log_refresh_counts(before_count, after_count)
+
+    db.client.close()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    df = extract_transform()
+    write_csv(df)
+    push_to_mongo()
 
 
 if __name__ == "__main__":
