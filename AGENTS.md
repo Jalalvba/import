@@ -45,11 +45,12 @@ detail — this file states the rule, not the case for it.
    run as low-risk until it's been verified end-to-end against real data
    at least once.
 
-5. **Every pipeline fails loudly on missing required columns**, via
-   `lib/validate.py`'s `validate_columns()` (raises `ValueError`). Never
-   silently drop a validation check or paper over a missing/renamed Excel
-   column with a default value — surface the error so the input file
-   mismatch gets caught before bad data reaches `output/` or Mongo.
+5. **All four pipeline scripts (`ds.py`, `cp.py`, `bc.py`, `parc.py`) fail
+   loudly on missing required columns**, via `lib/validate.py`'s
+   `validate_columns()` (raises `ValueError`). Never silently drop a
+   validation check or paper over a missing/renamed Excel column with a
+   default value — surface the error so the input file mismatch gets
+   caught before bad data reaches `output/` or Mongo.
 
 6. **All paths are relative to the repo root via
    `Path(__file__).parent`.** Never introduce a hardcoded absolute path
