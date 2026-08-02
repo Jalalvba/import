@@ -4,3 +4,5 @@ pymongo>=4.17.0,<5
 python-dotenv>=1.2.2,<2
 python-calamine>=0.8.2,<0.9
 dnspython>=2.8.0,<3
+google-api-python-client>=2.198.0,<3
+google-auth>=2.56.2,<3
