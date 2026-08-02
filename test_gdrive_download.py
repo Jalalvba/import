@@ -2,10 +2,13 @@
 """
 test_gdrive_download.py
 ------------------------
-Temporary, standalone check: not part of run.py yet. Confirms
+Optional, standalone manual debugging tool — not part of the automated
+run.py flow, and not called by anything else in the repo. Confirms
 get_latest_expected_files() downloads correct, valid-looking byte content
 for the expected pipeline input files — dedupe-by-latest-modifiedTime
-included — before anything is wired into the real pipeline.
+included. Useful when diagnosing a pipeline failure: run this to check
+"did we actually fetch valid Excel bytes from Drive" before suspecting
+the transform/Mongo logic in ds.py/cp.py/parc.py/bc.py.
 
 Usage:
     python3 test_gdrive_download.py

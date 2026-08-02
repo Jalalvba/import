@@ -31,10 +31,6 @@ build/
 # ── Outputs ───────────────────────────────────────────────────────────────────
 DS/
 
-# ── Input data (raw Excel — keep folder, ignore contents) ────────────────────
-input/*
-!input/.gitkeep
-
 # ── Output data (generated CSVs — keep folder, ignore contents) ──────────────
 output/*
 !output/.gitkeep
@@ -55,3 +51,5 @@ desktop.ini
 *.log
 .env.production
 .env.development
+.vercel
+.env*

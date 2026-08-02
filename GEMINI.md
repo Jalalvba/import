@@ -5,12 +5,19 @@ hard constraint, not a suggestion.
 
 ## What you may do
 - Read any file in this repository (scripts, `lib/`, `.env.example`, CSV
-  output already present in `output/`, raw Excel/XLS files in `input/`)
+  output already present in `output/`). Pipeline input is fetched from a
+  Google Drive folder (`GOOGLE_DRIVE_FOLDER_ID`) at run time via a service
+  account, not read from a local `input/` folder — you have no Drive API
+  access in read-only audit mode, so you cannot inspect the source Excel
+  files directly; base any claim about their contents on `output/*.csv`
+  or a live MongoDB read instead. The local `input/` folder has been
+  deleted entirely as part of the Drive migration — it no longer exists
+  on disk, so don't reference it as a source of anything.
 - Query MongoDB Atlas with read-only operations only (counts, sample
   documents, index inspection)
 - Analyze, summarize, and audit anything you find — e.g. whether a CSV's
-  columns match what a pipeline script expects, whether `input/` and
-  `output/` are in sync, whether a docstring's path claim matches the
+  columns match what a pipeline script expects, whether `output/` is
+  stale relative to Mongo, whether a docstring's path claim matches the
   actual `Path(__file__).parent`-based code
 
 ## What you must NEVER do

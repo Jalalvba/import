@@ -24,10 +24,10 @@ detail — this file states the rule, not the case for it.
    before the replacement data is fully written and verified, so a failed
    insert leaves the original collection untouched rather than empty.
    That said: never run either of these against a CSV you haven't just
-   regenerated from a current input file — a stale or partial CSV
-   faithfully replaces the entire collection with stale or partial data.
-   Always check the printed before/after record counts before treating
-   the run as successful.
+   regenerated from a current fetch of the Drive input file — a stale or
+   partial CSV faithfully replaces the entire collection with stale or
+   partial data. Always check the printed before/after record counts
+   before treating the run as successful.
 
 3. **`ds.py`/`bc.py` do a partial, date-bounded write, not a full
    reload**, via `lib/mongo.py`'s `date_scoped_reload()`. Each deletes and
@@ -40,10 +40,13 @@ detail — this file states the rule, not the case for it.
    had no Mongo path at all (`bc_csv.py` only generated a CSV). It now
    follows the same date-scoped partial-refresh pattern as `ds.py`
    (`Date BC` → `bc` collection), confirmed with Jalal beforehand. It has
-   only ever been verified against synthetic data — `input/YBONTEC.xlsx`
-   was not available when it was built — so don't treat a `python bc.py`
-   run as low-risk until it's been verified end-to-end against real data
-   at least once.
+   only ever been verified against synthetic data — `YBONTEC.xlsx` has
+   never been present in the Drive folder when a pipeline run was
+   verified — so don't treat a `python bc.py` run as low-risk until it's
+   been verified end-to-end against real data at least once. `run.py`
+   already skips `bc.py` cleanly (no error) when `YBONTEC.xlsx` is absent
+   from the Drive folder, matching its old local-`input/`-absent skip
+   behavior.
 
 5. **All four pipeline scripts (`ds.py`, `cp.py`, `bc.py`, `parc.py`) fail
    loudly on missing required columns**, via `lib/validate.py`'s
@@ -123,10 +126,11 @@ This project uses two AI tools with strictly separated roles:
 
 - Before starting work from a Gemini-sourced prompt: verify its claims
   against the real repo/data first, per the protocol above.
-- Before running any of the four pipeline scripts: confirm `input/` has
-  the current source Excel file — running one always both regenerates
-  the CSV and pushes to Mongo in the same invocation, there's no
-  separate "just regenerate the CSV" step to check freshness against
-  beforehand. Note the printed before/after record counts once it runs.
+- Before running any of the four pipeline scripts: confirm the Drive
+  folder (`GOOGLE_DRIVE_FOLDER_ID`) has the current source Excel file —
+  running one always both fetches it fresh from Drive, regenerates the
+  CSV, and pushes to Mongo in the same invocation, there's no separate
+  "just regenerate the CSV" step to check freshness against beforehand.
+  Note the printed before/after record counts once it runs.
 - Commit small and often so any mistaken change is trivially revertible
   (`git revert`).

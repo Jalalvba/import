@@ -2,9 +2,12 @@
 """
 test_gdrive_auth.py
 --------------------
-Temporary, standalone check: not part of run.py yet. Confirms
+Optional, standalone manual debugging tool — not part of the automated
+run.py flow, and not called by anything else in the repo. Confirms
 GOOGLE_SERVICE_ACCOUNT_KEY_B64 / GOOGLE_DRIVE_FOLDER_ID are set up
-correctly by listing the target Drive folder's contents.
+correctly by listing the target Drive folder's contents. Useful when
+diagnosing a pipeline failure: run this first to isolate "Drive access is
+broken" from "pipeline transform logic is broken."
 
 Usage:
     python3 test_gdrive_auth.py
