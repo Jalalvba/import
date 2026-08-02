@@ -3,14 +3,14 @@
 run.py
 ------
 Auto-detects which Excel files are present in input/ (relative to this
-file's directory, via Path(__file__).parent)
-and runs the full pipeline (csv + refresh) for each one found.
+file's directory, via Path(__file__).parent) and runs the matching
+single-file pipeline (Excel -> CSV -> Mongo) for each one found.
 
 Pipelines:
-    YFACSCALDS.xlsx          → ds_csv.py  → ds_refresh.py
-    ConditionParticulieres.xls → cp_csv.py  → cp_refresh.py
-    Fullparcs.xls            → parc_csv.py → parc_refresh.py
-    YBONTEC.xlsx             → bc_csv.py   (no refresh script yet)
+    YFACSCALDS.xlsx            → ds.py
+    ConditionParticulieres.xls → cp.py
+    Fullparcs.xls               → parc.py
+    YBONTEC.xlsx                → bc.py
 
 Usage:
     python run.py
@@ -20,27 +20,27 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ── Pipeline map: input file → [csv script, refresh script or None] ──────────
+# ── Pipeline map: input file → single-file pipeline script ───────────────────
 PIPELINES = [
     {
-        "label":   "DS (Consumption sheets)",
-        "input":   "YFACSCALDS.xlsx",
-        "scripts": ["ds_csv.py", "ds_refresh.py"],
+        "label":  "DS (Consumption sheets)",
+        "input":  "YFACSCALDS.xlsx",
+        "script": "ds.py",
     },
     {
-        "label":   "CP (Contract particulars)",
-        "input":   "ConditionParticulieres.xls",
-        "scripts": ["cp_csv.py", "cp_refresh.py"],
+        "label":  "CP (Contract particulars)",
+        "input":  "ConditionParticulieres.xls",
+        "script": "cp.py",
     },
     {
-        "label":   "PARC (Fleet parks)",
-        "input":   "Fullparcs.xls",
-        "scripts": ["parc_csv.py", "parc_refresh.py"],
+        "label":  "PARC (Fleet parks)",
+        "input":  "Fullparcs.xls",
+        "script": "parc.py",
     },
     {
-        "label":   "BC (Purchase orders)",
-        "input":   "YBONTEC.xlsx",
-        "scripts": ["bc_csv.py"],   # no refresh script yet
+        "label":  "BC (Purchase orders)",
+        "input":  "YBONTEC.xlsx",
+        "script": "bc.py",
     },
 ]
 
@@ -86,20 +86,18 @@ def main():
     errors = []
 
     for pipeline in found:
-        label   = pipeline["label"]
-        scripts = pipeline["scripts"]
+        label  = pipeline["label"]
+        script = pipeline["script"]
 
         print(f"{'─' * 60}")
         print(f"▶  {label}")
         print(f"{'─' * 60}")
 
-        for script in scripts:
-            print(f"\n  ⚙️  Running {script} ...")
-            ok = run_script(script)
-            if not ok:
-                print(f"  ❌ {script} failed — stopping pipeline for {label}")
-                errors.append(f"{label} / {script}")
-                break  # don't run refresh if csv step failed
+        print(f"\n  ⚙️  Running {script} ...")
+        ok = run_script(script)
+        if not ok:
+            print(f"  ❌ {script} failed")
+            errors.append(f"{label} / {script}")
         print()
 
     print(f"{'═' * 60}")
