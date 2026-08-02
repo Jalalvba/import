@@ -2,37 +2,39 @@
 """
 ds.py
 -----
-End-to-end DS (consumption sheet) pipeline: reads input/YFACSCALDS.xlsx
-(relative to this file's directory, via Path(__file__).parent), cleans
-and normalizes all fields, writes output/ds.csv, then pushes a
-date-scoped partial refresh to the `ds` MongoDB collection.
+End-to-end DS (consumption sheet) pipeline: reads YFACSCALDS.xlsx fetched
+from the Google Drive folder (GOOGLE_DRIVE_FOLDER_ID in .env), cleans and
+normalizes all fields, writes output/ds.csv, then pushes a date-scoped
+partial refresh to the `ds` MongoDB collection.
 
 Only [earliest Date DS in the CSV, end of year) is touched in Atlas —
 records before that date are left untouched.
 
 Usage:
-    python ds.py           # defaults to current year
+    python ds.py           # fetches from Drive, defaults to current year
     python ds.py 2026      # explicit year
 
 Requirements:
-    pip install pandas openpyxl pymongo python-dotenv
+    pip install pandas openpyxl pymongo python-dotenv google-api-python-client google-auth
 """
 
+import io
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from lib.transform import BC_DS_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
 from lib.mongo import csv_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
 
-INPUT_DIR  = Path(__file__).parent / "input"
 OUTPUT_DIR = Path(__file__).parent / "output"
-INPUT_FILE = INPUT_DIR / "YFACSCALDS.xlsx"
 OUTPUT_CSV = OUTPUT_DIR / "ds.csv"
 COLLECTION = "ds"
+FILENAME   = "YFACSCALDS.xlsx"
 
 COLUMNS_NEEDED = [
     "Date DS",
@@ -53,12 +55,12 @@ DATE_COLUMNS = ["Date DS"]
 
 
 # ── Excel → CSV ───────────────────────────────────────────────────────────────
-def extract_transform() -> pd.DataFrame:
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"❌ File not found: {INPUT_FILE}")
+def extract_transform(file_bytes: bytes) -> pd.DataFrame:
+    if not file_bytes:
+        raise ValueError(f"❌ No bytes provided for {FILENAME}")
 
-    print(f"  Reading: {INPUT_FILE.name}", flush=True)
-    df = pd.read_excel(INPUT_FILE, header=1)
+    print(f"  Reading: {FILENAME} ({len(file_bytes):,} bytes)", flush=True)
+    df = pd.read_excel(io.BytesIO(file_bytes), header=1)
     df.columns = [c.strip() for c in df.columns]
 
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
@@ -124,13 +126,21 @@ def push_to_mongo(year: int) -> None:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main():
-    year = int(sys.argv[1]) if len(sys.argv) > 1 else datetime.now().year
+def main(file_bytes: bytes, year: int | None = None):
+    year = year if year is not None else datetime.now().year
 
-    df = extract_transform()
+    df = extract_transform(file_bytes)
     write_csv(df)
     push_to_mongo(year)
 
 
 if __name__ == "__main__":
-    main()
+    from lib.gdrive import fetch_file
+
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise EnvironmentError("❌ GOOGLE_DRIVE_FOLDER_ID not set in .env")
+
+    arg_year = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    main(fetch_file(folder_id, FILENAME), arg_year)

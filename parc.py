@@ -2,34 +2,35 @@
 """
 parc.py
 -------
-End-to-end PARC (fleet park) pipeline: reads input/Fullparcs.xls
-(relative to this file's directory, via Path(__file__).parent),
-extracts needed columns, cleans and normalizes all fields, writes
-output/parc.csv, then pushes a full atomic reload to the `parc`
-MongoDB collection.
+End-to-end PARC (fleet park) pipeline: reads Fullparcs.xls fetched from
+the Google Drive folder (GOOGLE_DRIVE_FOLDER_ID in .env), extracts
+needed columns, cleans and normalizes all fields, writes output/parc.csv,
+then pushes a full atomic reload to the `parc` MongoDB collection.
 
 Usage:
     python parc.py
 
 Requirements:
-    pip install pandas openpyxl python-calamine pymongo python-dotenv
+    pip install pandas openpyxl python-calamine pymongo python-dotenv google-api-python-client google-auth
 """
 
+import io
+import os
 import sys
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 from pymongo.errors import PyMongoError
 
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
 from lib.mongo import atomic_reload, csv_to_mongo_records, get_mongo_db, log_refresh_counts
 
-INPUT_DIR  = Path(__file__).parent / "input"
 OUTPUT_DIR = Path(__file__).parent / "output"
-INPUT_FILE = INPUT_DIR / "Fullparcs.xls"
 OUTPUT_CSV = OUTPUT_DIR / "parc.csv"
 COLLECTION = "parc"
+FILENAME   = "Fullparcs.xls"
 
 HEADER_ROW = 7  # row 8 → 0-indexed = 7
 
@@ -56,12 +57,12 @@ INDEX_SPECS = [
 
 
 # ── Excel → CSV ───────────────────────────────────────────────────────────────
-def extract_transform() -> pd.DataFrame:
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"❌ File not found: {INPUT_FILE}")
+def extract_transform(file_bytes: bytes) -> pd.DataFrame:
+    if not file_bytes:
+        raise ValueError(f"❌ No bytes provided for {FILENAME}")
 
-    print(f"  Reading: {INPUT_FILE.name}", flush=True)
-    df = pd.read_excel(INPUT_FILE, engine="calamine", header=HEADER_ROW)
+    print(f"  Reading: {FILENAME} ({len(file_bytes):,} bytes)", flush=True)
+    df = pd.read_excel(io.BytesIO(file_bytes), engine="calamine", header=HEADER_ROW)
     df.columns = [c.strip() for c in df.columns]
 
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
@@ -129,11 +130,18 @@ def push_to_mongo() -> None:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main():
-    df = extract_transform()
+def main(file_bytes: bytes):
+    df = extract_transform(file_bytes)
     write_csv(df)
     push_to_mongo()
 
 
 if __name__ == "__main__":
-    main()
+    from lib.gdrive import fetch_file
+
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise EnvironmentError("❌ GOOGLE_DRIVE_FOLDER_ID not set in .env")
+
+    main(fetch_file(folder_id, FILENAME))

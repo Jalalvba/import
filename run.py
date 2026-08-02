@@ -2,9 +2,10 @@
 """
 run.py
 ------
-Auto-detects which Excel files are present in input/ (relative to this
-file's directory, via Path(__file__).parent) and runs the matching
-single-file pipeline (Excel -> CSV -> Mongo) for each one found.
+Fetches the latest pipeline input files from the Google Drive folder
+(GOOGLE_DRIVE_FOLDER_ID in .env) ONCE, in memory, then runs each
+matching single-file pipeline (bytes -> CSV -> Mongo) for each file that
+was found, skipping pipelines whose input file is absent from Drive.
 
 Pipelines:
     YFACSCALDS.xlsx            → ds.py
@@ -16,88 +17,95 @@ Usage:
     python run.py
 """
 
-import subprocess
-import sys
+import os
+import traceback
 from pathlib import Path
 
-# ── Pipeline map: input file → single-file pipeline script ───────────────────
+from dotenv import load_dotenv
+
+import bc
+import cp
+import ds
+import parc
+from lib.gdrive import get_latest_expected_files
+
+# ── Pipeline map: Drive filename → single-file pipeline module ───────────────
 PIPELINES = [
     {
-        "label":  "DS (Consumption sheets)",
-        "input":  "YFACSCALDS.xlsx",
-        "script": "ds.py",
+        "label":    "DS (Consumption sheets)",
+        "filename": "YFACSCALDS.xlsx",
+        "module":   ds,
     },
     {
-        "label":  "CP (Contract particulars)",
-        "input":  "ConditionParticulieres.xls",
-        "script": "cp.py",
+        "label":    "CP (Contract particulars)",
+        "filename": "ConditionParticulieres.xls",
+        "module":   cp,
     },
     {
-        "label":  "PARC (Fleet parks)",
-        "input":  "Fullparcs.xls",
-        "script": "parc.py",
+        "label":    "PARC (Fleet parks)",
+        "filename": "Fullparcs.xls",
+        "module":   parc,
     },
     {
-        "label":  "BC (Purchase orders)",
-        "input":  "YBONTEC.xlsx",
-        "script": "bc.py",
+        "label":    "BC (Purchase orders)",
+        "filename": "YBONTEC.xlsx",
+        "module":   bc,
     },
 ]
 
-ROOT      = Path(__file__).parent
-INPUT_DIR = ROOT / "input"
-PYTHON    = sys.executable  # use the same venv python that launched run.py
+ROOT = Path(__file__).parent
 
 
-def run_script(script: str) -> bool:
-    """Run a script and stream its output. Returns True if successful."""
-    path = ROOT / script
-    if not path.exists():
-        print(f"  ⚠️  Script not found: {script} — skipping")
+def run_pipeline(pipeline: dict, file_bytes: bytes) -> bool:
+    """Call a pipeline module's main() in-process. Returns True if successful.
+    A pipeline's own sys.exit(1) on a failed Mongo push (cp.py/parc.py) is
+    caught here too, so one pipeline failing doesn't kill run.py itself —
+    same behavior as the old subprocess-per-script return-code check."""
+    try:
+        pipeline["module"].main(file_bytes)
+        return True
+    except SystemExit as e:
+        return e.code in (None, 0)
+    except Exception:
+        traceback.print_exc()
         return False
-
-    result = subprocess.run(
-        [PYTHON, str(path)],
-        cwd=str(ROOT),
-    )
-    return result.returncode == 0
 
 
 def main():
-    print("🔍 Scanning input/ for Excel files...\n")
+    load_dotenv(dotenv_path=ROOT / ".env")
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise EnvironmentError("❌ GOOGLE_DRIVE_FOLDER_ID not set in .env")
 
-    found = []
-    for pipeline in PIPELINES:
-        if (INPUT_DIR / pipeline["input"]).exists():
-            found.append(pipeline)
+    print(f"🔍 Fetching input files from Drive folder {folder_id}...\n")
+    files = get_latest_expected_files(folder_id)
 
-    if not found:
-        print("❌ No Excel files found in input/")
-        print("   Place one or more of these files in input/:")
-        for p in PIPELINES:
-            print(f"   - {p['input']}")
-        return
+    found   = [p for p in PIPELINES if p["filename"] in files]
+    skipped = [p for p in PIPELINES if p["filename"] not in files]
 
     print(f"✅ Found {len(found)} file(s) to process:\n")
     for p in found:
-        print(f"   • {p['input']}  →  {p['label']}")
+        print(f"   • {p['filename']}  →  {p['label']}")
+    for p in skipped:
+        print(f"   ⚠️  {p['filename']}  →  {p['label']}  (not found in Drive — skipping)")
     print()
 
     errors = []
 
     for pipeline in found:
-        label  = pipeline["label"]
-        script = pipeline["script"]
+        label      = pipeline["label"]
+        module     = pipeline["module"]
+        file_bytes = files[pipeline["filename"]]
 
         print(f"{'─' * 60}")
         print(f"▶  {label}")
         print(f"{'─' * 60}")
 
-        print(f"\n  ⚙️  Running {script} ...")
-        ok = run_script(script)
+        print(f"\n  ⚙️  Running {module.__name__}.py ...")
+        ok = run_pipeline(pipeline, file_bytes)
         if not ok:
-            print(f"  ❌ {script} failed")
-            errors.append(f"{label} / {script}")
+            print(f"  ❌ {module.__name__}.py failed")
+            errors.append(f"{label} / {module.__name__}.py")
         print()
 
     print(f"{'═' * 60}")
