@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
@@ -31,6 +32,35 @@ def get_mongo_db(env_path: Path | None = None):
 
     client = MongoClient(uri)
     return client[db_name]
+
+
+def csv_to_mongo_records(csv_path: Path, date_columns: list[str]) -> list[dict]:
+    """Read a clean CSV (written by a pipeline script) and convert each row
+    into a Mongo-ready dict: date_columns are parsed to Python datetime (or
+    None if blank/unparseable), every other blank/NaN field is dropped, and
+    non-empty fields are stripped to string."""
+    df = pd.read_csv(csv_path, dtype=str)
+    df.columns = [c.strip() for c in df.columns]
+
+    for col in date_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
+
+    records = df.to_dict(orient="records")
+
+    clean_records = []
+    for rec in records:
+        doc = {}
+        for k, v in rec.items():
+            if k in date_columns:
+                doc[k] = v.to_pydatetime() if pd.notna(v) else None
+            else:
+                if pd.isna(v) or str(v).strip() == "":
+                    continue
+                doc[k] = str(v).strip()
+        clean_records.append(doc)
+
+    return clean_records
 
 
 def atomic_reload(db, collection_name: str, records: list[dict], index_specs) -> None:

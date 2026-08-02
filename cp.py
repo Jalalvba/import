@@ -26,7 +26,7 @@ from pymongo.errors import PyMongoError
 
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
-from lib.mongo import atomic_reload, get_mongo_db, log_refresh_counts
+from lib.mongo import atomic_reload, csv_to_mongo_records, get_mongo_db, log_refresh_counts
 
 INPUT_DIR  = Path(__file__).parent / "input"
 OUTPUT_DIR = Path(__file__).parent / "output"
@@ -152,29 +152,9 @@ def extract_mongo_records() -> list[dict]:
     if not OUTPUT_CSV.exists():
         raise FileNotFoundError(f"❌ File not found: {OUTPUT_CSV}\n   CSV step must run first.")
 
-    df = pd.read_csv(OUTPUT_CSV, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
-
-    for col in DATE_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
-
-    records = df.to_dict(orient="records")
-
-    clean_records = []
-    for rec in records:
-        doc = {}
-        for k, v in rec.items():
-            if k in DATE_COLUMNS:
-                doc[k] = v.to_pydatetime() if pd.notna(v) else None
-            else:
-                if pd.isna(v) or str(v).strip() == "":
-                    continue
-                doc[k] = str(v).strip()
-        clean_records.append(doc)
-
-    print(f"  → {len(clean_records)} records", flush=True)
-    return clean_records
+    records = csv_to_mongo_records(OUTPUT_CSV, DATE_COLUMNS)
+    print(f"  → {len(records)} records", flush=True)
+    return records
 
 
 def push_to_mongo() -> None:

@@ -26,7 +26,7 @@ import pandas as pd
 
 from lib.transform import BC_DS_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
-from lib.mongo import date_scoped_reload, get_mongo_db, log_refresh_counts
+from lib.mongo import csv_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
 
 INPUT_DIR  = Path(__file__).parent / "input"
 OUTPUT_DIR = Path(__file__).parent / "output"
@@ -91,37 +91,18 @@ def extract_mongo_records(year: int) -> tuple[list[dict], object]:
     if not OUTPUT_CSV.exists():
         raise FileNotFoundError(f"❌ File not found: {OUTPUT_CSV}\n   CSV step must run first.")
 
-    df = pd.read_csv(OUTPUT_CSV, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
+    records = csv_to_mongo_records(OUTPUT_CSV, DATE_COLUMNS)
+    year_records = [r for r in records if r.get("Date DS") is not None and r["Date DS"].year == year]
 
-    df["Date DS"] = pd.to_datetime(df["Date DS"], utc=True, errors="coerce")
-    df = df[df["Date DS"].dt.year == year]
-
-    if df.empty:
+    if not year_records:
         print(f"  ⚠️  No records found for year {year} in ds.csv")
         return [], None
 
-    earliest_date = df["Date DS"].min()
+    earliest_date = min(r["Date DS"] for r in year_records)
     print(f"  📅 Earliest date in CSV: {earliest_date.date()}", flush=True)
 
-    df = df[df["N°DS"].notna() & (df["N°DS"].str.strip() != "")]
-
-    records = df.to_dict(orient="records")
-
-    clean_records = []
-    for rec in records:
-        doc = {}
-        for k, v in rec.items():
-            if k == "Date DS":
-                doc[k] = v.to_pydatetime() if pd.notna(v) else None
-            else:
-                if pd.isna(v) or str(v).strip() == "":
-                    continue
-                doc[k] = str(v).strip()
-        clean_records.append(doc)
-
-    print(f"  → {len(clean_records)} records in CSV for year {year}", flush=True)
-    return clean_records, earliest_date
+    print(f"  → {len(year_records)} records in CSV for year {year}", flush=True)
+    return year_records, earliest_date
 
 
 def push_to_mongo(year: int) -> None:
