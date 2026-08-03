@@ -16,6 +16,21 @@ includes each pipeline's run_id and step summary (from run_all()), so a
 run triggered here can be looked up afterward in the `pipeline_runs`
 Mongo collection the same way a local run.py run can.
 
+Skip-if-unchanged and size-tier handling live entirely in run_all() (see
+lib/pipeline_state.py, lib/size_check.py) -- this file just passes
+?force=true/1/yes through as run_all()'s `force` kwarg, which bypasses
+the unchanged-skip (never the hard-fail size check) for a manual re-run,
+e.g. after suspecting Mongo data was corrupted independently of the
+source file:
+
+    https://<deployment-domain>/api?token=<secret>&force=true
+
+The response's `results[].status` is one of "success" / "failed" /
+"skipped_absent" (file not in the Drive folder at all) /
+"skipped_unchanged" (unchanged since the last successful run) -- a
+top-level `summary` dict tallies counts per status so a caller doesn't
+have to scan `results` to tell a real run from a no-op one.
+
 This is still a single, synchronous Vercel invocation — one request in,
 one JSON response out only once every pipeline has finished (or the
 whole thing times out). It does NOT stream run_ids to the caller as
@@ -59,26 +74,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 
 import run as pipeline_run
-from lib.gdrive import get_latest_expected_files
+from lib.gdrive import list_expected_files
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _run_all_pipelines() -> list[dict]:
-    """Fetches all expected files from Drive once, then delegates the
-    per-pipeline run/log/persist loop entirely to run.run_all() -- so this
-    file doesn't duplicate that logic, and the response gets the same
-    run_id + step summary per pipeline that run.py's own console output
-    shows."""
+def _run_all_pipelines(force: bool = False) -> list[dict]:
+    """Lists all expected files' metadata from Drive once (no bytes
+    downloaded yet), then delegates the per-pipeline skip-check/size-check/
+    run/log/persist loop entirely to run.run_all() -- so this file doesn't
+    duplicate that logic, and the response gets the same run_id + step
+    summary + status per pipeline that run.py's own console output shows."""
     load_dotenv(dotenv_path=ROOT / ".env")
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
     if not folder_id:
         raise EnvironmentError("GOOGLE_DRIVE_FOLDER_ID not set")
 
-    print(f"Fetching input files from Drive folder {folder_id}...\n")
-    files = get_latest_expected_files(folder_id)
+    print(f"Listing input files in Drive folder {folder_id}...\n")
+    file_metadata = list_expected_files(folder_id)
 
-    return pipeline_run.run_all(files)
+    return pipeline_run.run_all(file_metadata, force=force)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -92,6 +107,7 @@ class handler(BaseHTTPRequestHandler):
         expected_token = os.getenv("PIPELINE_TRIGGER_SECRET")
         query = parse_qs(urlparse(self.path).query)
         token = (query.get("token") or [None])[0]
+        force = (query.get("force") or [""])[0].strip().lower() in ("1", "true", "yes")
 
         # Constant-time comparison; bail out before touching Drive/Mongo
         # at all if the token is missing or wrong.
@@ -102,7 +118,7 @@ class handler(BaseHTTPRequestHandler):
         log_buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
-                results = _run_all_pipelines()
+                results = _run_all_pipelines(force=force)
         except Exception:
             traceback.print_exc(file=log_buffer)
             self._respond(500, {
@@ -112,9 +128,14 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        any_failed = any(r["status"] == "failed" for r in results)
+        summary = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "failed": 0}
+        for r in results:
+            summary[r["status"]] += 1
+
+        any_failed = summary["failed"] > 0
         self._respond(200 if not any_failed else 207, {
             "success": not any_failed,
+            "summary": summary,
             "results": results,
             "log": log_buffer.getvalue(),
         })

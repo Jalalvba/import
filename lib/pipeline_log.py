@@ -29,6 +29,7 @@ _STATUS_MARKERS = {
     "success": "✅",
     "failed": "❌",
     "skipped": "⚠️",
+    "warning": "🟠",
 }
 
 _COLLECTION = "pipeline_runs"

@@ -74,8 +74,11 @@ def _load_service_account_credentials(env_path: Path | None = None) -> Credentia
 
 
 def list_drive_files(folder_id: str) -> list[dict]:
-    """Return [{id, name, mimeType, modifiedTime}, ...] for every non-trashed
-    file directly inside folder_id, using Drive API v3, read-only scope."""
+    """Return [{id, name, mimeType, modifiedTime, size}, ...] for every
+    non-trashed file directly inside folder_id, using Drive API v3,
+    read-only scope. `size` (bytes, as a string) is populated for binary
+    files like the .xlsx/.xls inputs here; Drive omits it for native
+    Google Docs types, which this folder never contains."""
     if not folder_id:
         raise ValueError("❌ folder_id is required (pass GOOGLE_DRIVE_FOLDER_ID).")
 
@@ -89,7 +92,7 @@ def list_drive_files(folder_id: str) -> list[dict]:
             service.files()
             .list(
                 q=f"'{folder_id}' in parents and trashed = false",
-                fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
                 pageToken=page_token,
             )
             .execute()
@@ -132,15 +135,17 @@ def _latest_by_name(files: list[dict], names: set[str]) -> dict[str, dict]:
     return latest
 
 
-def get_latest_expected_files(folder_id: str) -> dict[str, bytes]:
-    """List folder_id, keep only the four known pipeline input filenames,
-    dedupe by filename (keeping the one with the latest modifiedTime when a
-    name appears more than once), download each survivor's bytes, and
-    return {filename: bytes}. YBONTEC.xlsx is optional and silently omitted
-    if absent; the other three are required and raise if any are missing.
+def list_expected_files(folder_id: str) -> dict[str, dict]:
+    """List folder_id and return {filename: {id, name, mimeType,
+    modifiedTime, size}} for the four known pipeline input filenames,
+    deduped by latest modifiedTime when a name repeats. Does NOT download
+    any bytes — this is the cheap metadata-only pass used to decide (via
+    lib.pipeline_state) whether a file has actually changed before paying
+    for a download. YBONTEC.xlsx is optional and silently omitted if
+    absent; the other three are required and raise if any are missing.
 
-    Fetches all expected files with a single folder listing — used by
-    run.py to avoid one Drive API round trip per pipeline script."""
+    Used by run.py to fetch every pipeline's metadata with a single Drive
+    listing call."""
     files = list_drive_files(folder_id)
     latest = _latest_by_name(files, EXPECTED_FILENAMES)
 
@@ -151,22 +156,29 @@ def get_latest_expected_files(folder_id: str) -> dict[str, bytes]:
             f"{', '.join(sorted(missing))}"
         )
 
+    return latest
+
+
+def get_latest_expected_files(folder_id: str) -> dict[str, bytes]:
+    """List folder_id via list_expected_files(), then unconditionally
+    download every survivor's bytes and return {filename: bytes}. Used by
+    the manual test_gdrive_download.py debugging tool; run.py itself
+    downloads selectively (see lib.pipeline_state.resolve_pipeline_run)
+    rather than calling this."""
+    latest = list_expected_files(folder_id)
     return {name: download_file_bytes(f["id"]) for name, f in latest.items()}
 
 
-def fetch_file(folder_id: str, filename: str) -> bytes:
-    """Fetch a single named file's bytes from folder_id, deduping by latest
-    modifiedTime if the name repeats. Used when a pipeline script is run
-    standalone (`python ds.py`) rather than orchestrated via run.py, so it
-    only needs its own file rather than all four."""
+def find_file_metadata(folder_id: str, filename: str) -> dict | None:
+    """List folder_id and return the {id, name, mimeType, modifiedTime,
+    size} metadata for filename (deduping by latest modifiedTime if the
+    name repeats), or None if absent — no bytes downloaded. Used by each
+    pipeline script's standalone `__main__` block (`python ds.py`) so it
+    can run the same skip-if-unchanged check run.py does before deciding
+    whether to call download_file_bytes()."""
     if not folder_id:
         raise ValueError("❌ folder_id is required (pass GOOGLE_DRIVE_FOLDER_ID).")
 
     files = list_drive_files(folder_id)
     latest = _latest_by_name(files, {filename})
-
-    match = latest.get(filename)
-    if match is None:
-        raise FileNotFoundError(f"❌ '{filename}' not found in Drive folder {folder_id}")
-
-    return download_file_bytes(match["id"])
+    return latest.get(filename)

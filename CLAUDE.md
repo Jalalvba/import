@@ -43,7 +43,7 @@ Each script runs the complete pipeline for its source — running any of these f
 python run.py
 ```
 
-Fetches all four expected filenames from the Drive folder **once** (a single Drive listing + download pass, so running all four pipelines together costs one round trip, not four), then calls each matching pipeline module's `main()` in-process for every file that was found, skipping pipelines whose input file is absent from Drive (`YBONTEC.xlsx` is optional; the other three are required and `run.py` raises if any of them is missing). Continues to the next pipeline if one fails — a pipeline's own `sys.exit(1)` on a failed Mongo push no longer terminates `run.py`, since pipelines are called as in-process functions rather than subprocesses.
+Lists all four expected filenames' **metadata** from the Drive folder **once** (a single Drive listing pass, no bytes downloaded yet — so running all four pipelines together costs one Drive round trip, not four), skips pipelines whose input file is absent from Drive (`YBONTEC.xlsx` is optional; the other three are required and `run.py` raises if any of them is missing), then for each present file checks `pipeline_state` and downloads + calls the matching pipeline module's `main()` in-process only if the file has actually changed since the last successful run (or `PIPELINE_FORCE_RUN=1` is set — see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection)). Continues to the next pipeline if one fails — a pipeline's own `sys.exit(1)` on a failed Mongo push no longer terminates `run.py`, since pipelines are called as in-process functions rather than subprocesses. `run.py`'s summary output distinguishes four outcomes per pipeline: `success` / `failed` / `skipped_absent` (file not in Drive) / `skipped_unchanged` (file unchanged since last success).
 
 There are no tests, linters, or CI configured.
 
@@ -54,14 +54,16 @@ There are no tests, linters, or CI configured.
 - **`lib/transform.py`** (pure, no I/O) — `format_date(val, formats)` normalizes dates to ISO 8601 (`YYYY-MM-DDTHH:MM:SS.000Z`, returns `""` for invalid/null); `clean_val(val)` strips Excel encoding artifacts (`_x000a_`, `_x000d_`, `_x[hex]_`) and collapses whitespace. `format_date` takes an explicit `formats` tuple rather than a merged list — `BC_DS_FORMATS` and `CP_PARC_FORMATS` are separate named constants because the two source systems have historically needed different tried-format orders (`BC_DS_FORMATS` uniquely tries `%m/%d/%Y`).
 - **`lib/validate.py`** (pure, no I/O) — `validate_columns(df, required_columns)` raises `ValueError` (never a silent return) if any required column is missing.
 - **`lib/mongo.py`** (I/O) — `get_mongo_db()` (`.env` loading + DNS resolver workaround + connected db handle); `df_to_mongo_records(df, date_columns)` (converts a pipeline's transformed DataFrame directly into Mongo-ready dicts — date columns parsed to Python `datetime`, blank fields dropped — with no CSV round trip); `atomic_reload(db, collection_name, records, index_specs)` (staged insert into `<collection>_staging`, verified count, atomic `rename(dropTarget=True)` swap — never a bare drop-then-insert, so the live collection is never dropped before the replacement data is fully written and verified); `date_scoped_reload(db, collection_name, records, date_field, earliest_date, year)` (deletes only `[earliest_date, end-of-year)`, then inserts — records before `earliest_date` are untouched); `log_refresh_counts(before, after)` (before/after/diff print).
-- **`lib/gdrive.py`** (I/O) — `list_drive_files(folder_id)` (Drive API v3, `drive.readonly` scope, returns `[{id, name, mimeType, modifiedTime}, ...]`); `download_file_bytes(file_id)` (in-memory `files().get_media()` download, no temp files); `get_latest_expected_files(folder_id)` (fetches all four known pipeline filenames in one listing pass, deduping by latest `modifiedTime` when a name repeats — used by `run.py`); `fetch_file(folder_id, filename)` (single-file fetch — used when a pipeline script is run standalone). Auth loads `GOOGLE_SERVICE_ACCOUNT_KEY_B64` from `.env`, base64-decodes + JSON-parses it, and builds `Credentials` in memory — the decoded key is never written to disk.
-- **`lib/pipeline_log.py`** (I/O) — `PipelineLogger` (one instance per pipeline run; `.log(step, status, detail)` records a step — `started`/`success`/`failed`/`skipped` — and prints it immediately, so console output and the persisted document can never drift apart; `.finish(status)`; `.to_document()`); `persist_run(logger)` inserts the run's full step log as one document into the `pipeline_runs` collection via its own short-lived connection, so a run's log can still be written even if the failure happened before the pipeline's own Mongo connection was ever opened.
+- **`lib/gdrive.py`** (I/O) — `list_drive_files(folder_id)` (Drive API v3, `drive.readonly` scope, returns `[{id, name, mimeType, modifiedTime, size}, ...]`); `download_file_bytes(file_id)` (in-memory `files().get_media()` download, no temp files); `list_expected_files(folder_id)` (lists all four known pipeline filenames' **metadata only** in one pass, deduping by latest `modifiedTime` when a name repeats — no bytes downloaded — used by `run.py`/`api/index.py` so the skip-if-unchanged check below can run before paying for a download); `get_latest_expected_files(folder_id)` (same listing, but downloads every survivor unconditionally — kept only for the manual `test_gdrive_download.py` debugging tool, no longer used by the pipelines themselves); `find_file_metadata(folder_id, filename)` (single-file metadata lookup, no download, `None` if absent — used by each pipeline script's standalone `__main__` block for the same skip-if-unchanged check). Auth loads `GOOGLE_SERVICE_ACCOUNT_KEY_B64` from `.env`, base64-decodes + JSON-parses it, and builds `Credentials` in memory — the decoded key is never written to disk.
+- **`lib/pipeline_log.py`** (I/O) — `PipelineLogger` (one instance per pipeline run; `.log(step, status, detail)` records a step — `started`/`success`/`failed`/`skipped`/`warning` — appends it to an in-memory list, prints it immediately, and writes it to the run's `pipeline_runs` document incrementally (an atomic `$push` per step, not one batched write at the end), so console output and the persisted record can never drift apart and a hard kill mid-run (e.g. a Vercel `maxDuration` timeout) still leaves a partial step history instead of losing the whole log; `.finish(status)` flips `status`/`finished_at` in place; `.to_document()`); `get_run_status(run_id)` reads a run's current `pipeline_runs` document by `run_id` — used by `api/status.py` to poll a run's live progress before it finishes.
+- **`lib/pipeline_state.py`** (I/O) — `get_state(pipeline)`/`update_state(...)` read/upsert the `pipeline_state` collection (see below); `force_requested()` reads `PIPELINE_FORCE_RUN` from the environment; `resolve_pipeline_run(pipeline, file_meta, logger, force=False)` is the shared skip-if-unchanged + size-tier decision used by both `run.py` and each script's standalone `__main__` — see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection) and [File Size Handling](#file-size-handling--heavy-excel-exports) below.
+- **`lib/size_check.py`** (pure, no I/O) — `WARN_BYTES`/`HARD_FAIL_BYTES` thresholds and `classify(size_bytes)` (`"unknown"|"normal"|"warn"|"hard_fail"`), checked against Drive's own reported file size before any download.
 
 ### Pipeline scripts (`ds.py`, `cp.py`, `bc.py`, `parc.py`)
 
 Each is a standalone, independently-runnable module with the same shape. Every step below is recorded via a `PipelineLogger` (`lib/pipeline_log.py`) passed into `extract_transform()`/`push_to_mongo()` — the same `.log()` call both prints to the console and appends to the run's `pipeline_runs` document, so the two can never drift out of sync:
 
-1. **Fetch** the source file's bytes from the Google Drive folder (`GOOGLE_DRIVE_FOLDER_ID` in `.env`) via `lib.gdrive` — run standalone, a script's own `if __name__ == "__main__"` block fetches its file and logs `drive_auth`/`drive_listing`/`file_download` steps around that call before invoking `main()`; run via `run.py`, all four files are fetched once upfront (one shared Drive listing pass) and those same three step entries are logged into each pipeline's own logger to reflect that the fetch already succeeded
+1. **Fetch** the source file's bytes from the Google Drive folder (`GOOGLE_DRIVE_FOLDER_ID` in `.env`) via `lib.gdrive` — but only after two gates, both logged as their own steps: a `skip_check` step compares the file's Drive `id` + `modifiedTime` against `pipeline_state` (see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection) below) and skips the entire run — no download, no write to the pipeline's data collection — if unchanged since the last successful run; then a `size_check` step classifies the file's Drive-reported byte size (see [File Size Handling](#file-size-handling--heavy-excel-exports) below) as normal / warn / hard-fail. Run standalone, a script's own `if __name__ == "__main__"` block looks up its file's metadata only (`lib.gdrive.find_file_metadata`, no bytes yet), runs both gates, then downloads and logs `drive_auth`/`drive_listing`/`skip_check`/`size_check`/`file_download` steps before invoking `main()`; run via `run.py`, all four files' **metadata** is listed once upfront (one shared Drive listing pass, no bytes yet) and the same gates + steps are logged into each pipeline's own logger, with bytes downloaded only for the pipelines that actually need to run
 2. **Read** Excel from those in-memory bytes (`pd.read_excel(io.BytesIO(file_bytes), ...)`) — XLSX files use openpyxl engine, legacy XLS files use calamine engine (`excel_parse` step)
 3. **Validate** required columns exist via `lib.validate.validate_columns` (fail loudly if missing; `column_validation` step)
 4. **Transform** — apply `lib.transform.format_date()`/`clean_val()`
@@ -69,7 +71,7 @@ Each is a standalone, independently-runnable module with the same shape. Every s
 6. **Push** directly to MongoDB via `lib.mongo` — the transformed DataFrame is converted straight to Mongo-ready records in memory via `df_to_mongo_records()`, with no CSV or other file written at any point (`mongo_connect` and `mongo_push` steps, the latter carrying the before/after/diff counts):
    - `ds.py`/`bc.py` — date-scoped partial refresh (`date_scoped_reload`), scoped on `Date DS`/`Date BC` respectively
    - `cp.py`/`parc.py` — atomic full reload (`atomic_reload`)
-7. **Persist the run log** — `main()` calls `logger.finish("success"|"failed")` and `lib.pipeline_log.persist_run(logger)` in a `try/except/else`, so a `pipeline_runs` document is written whether the run succeeded or failed (including a `pipeline_error` step with the exception detail on failure)
+7. **Finish the run log** — `main()` calls `logger.finish("success"|"failed")` in a `try/except`, which flips the already-incrementally-written `pipeline_runs` document's `status`/`finished_at` in place (including a `pipeline_error` step with the exception detail on failure) — there's no separate persist step, since every prior step was already written to Mongo as it happened (see the `lib/pipeline_log.py` bullet above)
 
 `parc.py` and `cp.py` read legacy XLS with `engine="calamine"`.
 
@@ -106,14 +108,91 @@ db.pipeline_runs.find({ status: "failed" }).sort({ started_at: -1 })          //
 
 A step left at `"started"` with no matching `"success"`/`"failed"` entry after it means the run crashed mid-step — that's the first thing to look at when debugging a failure.
 
+## Skip-if-unchanged (`pipeline_state` collection)
+
+The `pipeline_state` collection holds exactly one document per pipeline
+(`ds`/`cp`/`parc`/`bc`), tracking the last **successfully** processed file:
+
+```
+{
+  pipeline: "ds" | "cp" | "parc" | "bc",
+  filename: "YFACSCALDS.xlsx",
+  drive_file_id: "<drive file id>",
+  modified_time: "<Drive's modifiedTime, RFC3339 string>",
+  processed_at: <datetime>,
+  run_id: "<uuid4, links back to the pipeline_runs document>",
+}
+```
+
+Before downloading a file's bytes, `lib.pipeline_state.resolve_pipeline_run()`
+compares the currently-listed Drive file's `id` + `modifiedTime` against this
+document (via `lib.gdrive.list_expected_files`/`find_file_metadata`, which
+list metadata only — `download_file_bytes()` is never called for a file
+that turns out to be unchanged). If identical, the whole run is skipped: a
+single `skip_check` step (status `"skipped"`, detail `"unchanged since
+<timestamp>, skipping run"`) is logged, the run finishes immediately, and
+**nothing else is touched** — no download, no write to `ds`/`cp`/`parc`/`bc`.
+If different (new file, changed `modifiedTime`, or no `pipeline_state`
+document yet — first run), the pipeline runs normally and `pipeline_state`
+is updated **only on success** — a failed run is never remembered as
+"processed," so the next trigger retries it properly.
+
+**Forcing a re-run** even when unchanged (for manual testing, or recovering
+from Mongo data that was corrupted independently of the source file) bypasses
+the skip check but never the hard-fail size check (below):
+
+```bash
+PIPELINE_FORCE_RUN=1 python3 run.py       # or ds.py/cp.py/bc.py/parc.py directly
+```
+
+```
+https://<deployment-domain>/api?token=<secret>&force=true
+```
+
+## File Size Handling — heavy Excel exports
+
+Right after Drive's listing call (before any download), `lib.size_check`
+classifies each file's Drive-reported `size` (bytes) into a tier, logged as
+a `size_check` step:
+
+- **normal** (≤ `WARN_BYTES` = 20MB) — no special handling. Chosen as
+  roughly 2x the largest file seen in production to date (`cp.py`'s
+  `ConditionParticulieres.xls`, ~11MB), so ordinary month-to-month growth
+  doesn't trigger noise.
+- **warn** (> 20MB, ≤ `HARD_FAIL_BYTES` = 100MB) — logged as a `"warning"`
+  step ("unusually large, processing may take longer / use more memory");
+  the pipeline still runs normally. A "full year of data" export landing in
+  this range is expected and fine.
+- **hard_fail** (> 100MB) — **on a Vercel-triggered run only**
+  (`VERCEL` env var set), the run fails fast with a clear `size_check`
+  step ("file exceeds safe processing size for Vercel — run this pipeline
+  locally instead: `python3 <script>.py`") and never attempts a download,
+  avoiding a silent OOM kill or `maxDuration` timeout. **A local run is not
+  blocked** at this tier — it logs a `"warning"` step and proceeds, since a
+  laptop doesn't share Vercel's memory/duration ceiling and running locally
+  is the documented escape hatch for a genuinely huge (e.g. multi-year)
+  export. `force=true`/`PIPELINE_FORCE_RUN` do **not** bypass this — force
+  only bypasses the unchanged-skip, not the size safety check.
+
+See [Vercel HTTP Trigger](#vercel-http-trigger) below for the current
+`maxDuration`/`memory` ceiling these thresholds are sized against.
+
 ## Vercel HTTP Trigger
 
-`api/index.py` is a Vercel Python serverless function that exposes `run.py`'s `run_all()` over HTTP — the pipeline can be triggered from a phone browser or `curl` instead of only `python run.py` locally. It reuses `run_all()` directly; it does not duplicate any fetch/transform/push/logging logic.
+`api/index.py` is a Vercel Python serverless function that exposes `run.py`'s `run_all()` over HTTP — the pipeline can be triggered from a phone browser or `curl` instead of only `python run.py` locally. It reuses `run_all()` directly; it does not duplicate any fetch/transform/push/logging logic. Skip-if-unchanged and size-tier handling apply here exactly as they do locally (see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection) and [File Size Handling](#file-size-handling--heavy-excel-exports) above) — add `&force=true` to bypass the unchanged-skip for a manual re-run.
+
+`api/status.py` (no token required — see its own docstring for why that's
+deliberate) serves `GET /api/status?run_id=<uuid>`, returning the current
+`pipeline_runs` document for that `run_id` — since `PipelineLogger` writes
+steps incrementally, this shows a run's live progress before it finishes,
+not just an end-of-run snapshot.
 
 **Endpoint URL pattern:**
 
 ```
 https://<deployment-domain>/api?token=<PIPELINE_TRIGGER_SECRET>
+https://<deployment-domain>/api?token=<PIPELINE_TRIGGER_SECRET>&force=true
+https://<deployment-domain>/api/status?run_id=<uuid-from-a-prior-response>
 ```
 
 `PIPELINE_TRIGGER_SECRET` is required as a query param (`?token=...`) and is checked with a constant-time comparison (`hmac.compare_digest`) against the `PIPELINE_TRIGGER_SECRET` env var set in Vercel's dashboard (Production, Preview, Development). A missing or wrong token returns `401` immediately, before Drive or Mongo are touched at all. Both `GET` and `POST` are accepted identically.
@@ -132,6 +211,8 @@ db.pipeline_runs.find_one({ run_id: "<id>" })
 
 **Duration:** `maxDuration` is `180` (in `vercel.json`, `functions["api/index.py"]`). It started at `60` but a live production trigger hit that cap and was killed mid-run — DS/CP/PARC had already completed successfully, but BC never started, confirmed safe only because `bc`'s collection count matched its last known-good state (no partial `date_scoped_reload` delete-without-reinsert occurred). Real Drive + Mongo Atlas round trips from Vercel's `iad1` region run slower than a local run (~66s end-to-end for all four pipelines observed in testing), so `180` gives real headroom rather than being flush against the observed time.
 
+**Memory:** `vercel.json`'s `functions["api/index.py"]` also now requests `"memory": 3009` (MB) — the documented maximum configurable value — up from the platform default (1024 MB), for headroom against a larger-than-tested file (e.g. a full year of data). This is the config *requested*; a Vercel plan tier can silently clamp it, so confirm the effective value actually applied (Vercel dashboard → Project → Functions, or `vercel inspect`) after deploying rather than assuming the requested number took effect. Together, `maxDuration: 180` + `memory: 3009` are the practical ceiling for what "too big to run on Vercel" means in this project — a file that trips the `hard_fail` size tier (see [File Size Handling](#file-size-handling--heavy-excel-exports)) is explicitly meant to be run locally instead of pushed against these limits.
+
 **Bundle size watch item:** the build log reports `Bundle size (228.12 MB) exceeds the standard size; optimizing dependencies` — Vercel's standard compressed-size limit is 250MB. It builds and deploys fine today, but there's limited headroom left; adding further heavy dependencies (another large Python package, a new SDK) could push this over the limit and break the build. Check the build log's bundle-size line after any `requirements.txt` change.
 
 ## Data & File Paths
@@ -140,7 +221,7 @@ All paths below are relative to the repo root (wherever this project is checked 
 
 ```
 ./
-├── run.py                  # orchestrator: fetches all input files from Drive once, runs the matching pipeline per file
+├── run.py                  # orchestrator: lists all input files' metadata from Drive once, skips unchanged files, runs the rest
 ├── ds.py                   # YFACSCALDS.xlsx (Drive) → `ds` (date-scoped), no CSV
 ├── cp.py                   # ConditionParticulieres.xls (Drive) → `cp` (atomic full reload), no CSV
 ├── bc.py                   # YBONTEC.xlsx (Drive) → `bc` (date-scoped), no CSV
@@ -149,13 +230,16 @@ All paths below are relative to the repo root (wherever this project is checked 
 │   ├── transform.py        # pure: clean_val(), format_date()
 │   ├── validate.py         # pure: validate_columns()
 │   ├── mongo.py             # I/O: get_mongo_db(), df_to_mongo_records(), atomic_reload(), date_scoped_reload(), log_refresh_counts()
-│   ├── gdrive.py            # I/O: list_drive_files(), download_file_bytes(), get_latest_expected_files(), fetch_file()
-│   └── pipeline_log.py      # I/O: PipelineLogger, persist_run() — durable step log → `pipeline_runs` collection
+│   ├── gdrive.py            # I/O: list_drive_files(), download_file_bytes(), list_expected_files(), find_file_metadata(), get_latest_expected_files()
+│   ├── pipeline_log.py      # I/O: PipelineLogger (incremental writes), get_run_status() — durable step log → `pipeline_runs` collection
+│   ├── pipeline_state.py    # I/O: get_state(), update_state(), resolve_pipeline_run() — skip-if-unchanged + size gate → `pipeline_state` collection
+│   └── size_check.py        # pure: WARN_BYTES, HARD_FAIL_BYTES, classify()
 ├── api/
-│   └── index.py             # Vercel serverless HTTP wrapper around run.py's run_all() (token-gated trigger) — served at /api
+│   ├── index.py             # Vercel serverless HTTP wrapper around run.py's run_all() (token-gated trigger, ?force=true) — served at /api
+│   └── status.py            # Vercel serverless GET /api/status?run_id=... — live progress polling, no token required
 ├── test_gdrive_auth.py      # optional manual debugging tool — Drive auth + listing only
 ├── test_gdrive_download.py  # optional manual debugging tool — Drive download + signature check
-├── vercel.json              # maxDuration override for api/index.py
+├── vercel.json              # maxDuration + memory override for api/index.py
 ├── .env                    # never committed
 └── requirements.txt
 ```
@@ -170,6 +254,12 @@ GOOGLE_DRIVE_FOLDER_ID=...           # the Drive folder ds.py/cp.py/parc.py/bc.p
 ```
 
 `PIPELINE_TRIGGER_SECRET` is a separate, Vercel-only env var — it's not read from local `.env` (the four pipeline scripts and `run.py` never touch it), only from Vercel's dashboard by `api/index.py`. See [Vercel HTTP Trigger](#vercel-http-trigger) above.
+
+`PIPELINE_FORCE_RUN` is an optional, ephemeral runtime override, not a
+persistent `.env` entry — set it inline for a single invocation
+(`PIPELINE_FORCE_RUN=1 python3 run.py`) to bypass the skip-if-unchanged
+check. See [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection)
+above.
 
 ## Where to find more detail
 
