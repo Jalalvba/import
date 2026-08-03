@@ -39,14 +39,14 @@ detail — this file states the rule, not the case for it.
 4. **`bc.py`'s Mongo push is new** — until the ETL restructuring, `bc`
    had no Mongo path at all (`bc_csv.py` only generated a CSV). It now
    follows the same date-scoped partial-refresh pattern as `ds.py`
-   (`Date BC` → `bc` collection), confirmed with Jalal beforehand. It has
-   only ever been verified against synthetic data — `YBONTEC.xlsx` has
-   never been present in the Drive folder when a pipeline run was
-   verified — so don't treat a `python bc.py` run as low-risk until it's
-   been verified end-to-end against real data at least once. `run.py`
-   already skips `bc.py` cleanly (no error) when `YBONTEC.xlsx` is absent
-   from the Drive folder, matching its old local-`input/`-absent skip
-   behavior.
+   (`Date BC` → `bc` collection), confirmed with Jalal beforehand. It was
+   verified end-to-end against real data for the first time on
+   2026-08-03, via a `python3 run.py` run with `YBONTEC.xlsx` present in
+   the Drive folder: 11959 rows written, before/after record counts
+   64219/64219 (diff 0). Prior runs had only ever exercised it against
+   synthetic data. `run.py` still skips `bc.py` cleanly (no error) when
+   `YBONTEC.xlsx` is absent from the Drive folder, matching its old
+   local-`input/`-absent skip behavior.
 
 5. **All four pipeline scripts (`ds.py`, `cp.py`, `bc.py`, `parc.py`) fail
    loudly on missing required columns**, via `lib/validate.py`'s
