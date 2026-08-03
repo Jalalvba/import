@@ -16,9 +16,13 @@ includes each pipeline's run_id and step summary (from run_all()), so a
 run triggered here can be looked up afterward in the `pipeline_runs`
 Mongo collection the same way a local run.py run can.
 
-NOTE ON DURATION: Excel parsing plus multiple Mongo writes can exceed
-Vercel's default 10s function timeout, so `maxDuration` is bumped for
-this specific function in vercel.json (functions["api/index.py"]).
+NOTE ON DURATION: running all four pipelines from Vercel's iad1 region
+took ~45s+ end-to-end against real Drive/Mongo Atlas traffic (slower
+than a local run) and blew past an initial maxDuration of 60, killing
+the invocation mid-run before the last pipeline started -- confirmed
+safe (no partial Mongo writes) by checking pipeline_runs and the
+un-touched collection afterward, but still killed the run. maxDuration
+is now 180 in vercel.json (functions["api/index.py"]) for headroom.
 """
 
 import contextlib
