@@ -10,7 +10,7 @@ collection -- no CSV intermediate. Every run's full step-by-step
 breakdown is persisted as one document in the `pipeline_runs` collection
 (see lib/pipeline_log.py).
 
-Only [earliest Date BC in the CSV, end of year) is touched in Atlas —
+Only [earliest Date BC in the source file, end of year) is touched in Atlas —
 records before that date are left untouched. (New in this pipeline —
 bc previously had no Mongo push at all.)
 

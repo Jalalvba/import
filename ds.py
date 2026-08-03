@@ -10,7 +10,7 @@ step-by-step breakdown is persisted as one document in the
 `pipeline_runs` collection (see lib/pipeline_log.py), since there's no
 more output/*.csv file to inspect afterward if something goes wrong.
 
-Only [earliest Date DS in the CSV, end of year) is touched in Atlas —
+Only [earliest Date DS in the source file, end of year) is touched in Atlas —
 records before that date are left untouched.
 
 Usage:

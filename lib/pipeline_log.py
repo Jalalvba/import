@@ -144,8 +144,8 @@ class PipelineLogger:
 
 def get_run_status(run_id: str) -> dict | None:
     """Read-only lookup of a run's current pipeline_runs document by
-    run_id -- used by api/status.py to poll a run's live progress.
-    Returns None if no such run_id exists (yet, or ever)."""
+    run_id -- used by api/index.py's /api/status route to poll a run's
+    live progress. Returns None if no such run_id exists (yet, or ever)."""
     db = get_mongo_db()
     try:
         return db[_COLLECTION].find_one({"run_id": run_id})
