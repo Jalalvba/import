@@ -2,7 +2,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 180,
-      "memory": 3009
+      "memory": 2048
     }
   }
 }
