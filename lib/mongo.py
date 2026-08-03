@@ -34,13 +34,13 @@ def get_mongo_db(env_path: Path | None = None):
     return client[db_name]
 
 
-def csv_to_mongo_records(csv_path: Path, date_columns: list[str]) -> list[dict]:
-    """Read a clean CSV (written by a pipeline script) and convert each row
-    into a Mongo-ready dict: date_columns are parsed to Python datetime (or
-    None if blank/unparseable), every other blank/NaN field is dropped, and
-    non-empty fields are stripped to string."""
-    df = pd.read_csv(csv_path, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
+def df_to_mongo_records(df: pd.DataFrame, date_columns: list[str]) -> list[dict]:
+    """Convert a pipeline's transformed DataFrame directly into Mongo-ready
+    dicts: date_columns (already ISO 8601 strings from format_date()) are
+    parsed to Python datetime (or None if blank/unparseable), every other
+    blank field is dropped, and non-empty fields are kept as their
+    already-cleaned string value."""
+    df = df.copy()
 
     for col in date_columns:
         if col in df.columns:

@@ -4,8 +4,11 @@ ds.py
 -----
 End-to-end DS (consumption sheet) pipeline: reads YFACSCALDS.xlsx fetched
 from the Google Drive folder (GOOGLE_DRIVE_FOLDER_ID in .env), cleans and
-normalizes all fields, writes output/ds.csv, then pushes a date-scoped
-partial refresh to the `ds` MongoDB collection.
+normalizes all fields, then pushes a date-scoped partial refresh directly
+to the `ds` MongoDB collection -- no CSV intermediate. Every run's full
+step-by-step breakdown is persisted as one document in the
+`pipeline_runs` collection (see lib/pipeline_log.py), since there's no
+more output/*.csv file to inspect afterward if something goes wrong.
 
 Only [earliest Date DS in the CSV, end of year) is touched in Atlas —
 records before that date are left untouched.
@@ -29,12 +32,12 @@ from dotenv import load_dotenv
 
 from lib.transform import BC_DS_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
-from lib.mongo import csv_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
+from lib.mongo import df_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
+from lib.pipeline_log import PipelineLogger, persist_run
 
-OUTPUT_DIR = Path(__file__).parent / "output"
-OUTPUT_CSV = OUTPUT_DIR / "ds.csv"
 COLLECTION = "ds"
 FILENAME   = "YFACSCALDS.xlsx"
+PIPELINE_NAME = "ds"
 
 COLUMNS_NEEDED = [
     "Date DS",
@@ -54,19 +57,25 @@ COLUMNS_NEEDED = [
 DATE_COLUMNS = ["Date DS"]
 
 
-# ── Excel → CSV ───────────────────────────────────────────────────────────────
-def extract_transform(file_bytes: bytes) -> pd.DataFrame:
+# ── Excel → Mongo records ──────────────────────────────────────────────────────
+def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame:
     if not file_bytes:
         raise ValueError(f"❌ No bytes provided for {FILENAME}")
 
-    print(f"  Reading: {FILENAME} ({len(file_bytes):,} bytes)", flush=True)
+    logger.log("excel_parse", "started", f"parsing {FILENAME}")
     df = pd.read_excel(io.BytesIO(file_bytes), header=1)
     df.columns = [c.strip() for c in df.columns]
+    logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
+    logger.log("column_validation", "started")
     validate_columns(df, needed_stripped)
+    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present")
 
     df = df[needed_stripped].copy()
+    rows_in = len(df)
+
+    logger.log("transform_filter", "started")
 
     for col in [c.strip() for c in DATE_COLUMNS]:
         if col in df.columns:
@@ -78,60 +87,68 @@ def extract_transform(file_bytes: bytes) -> pd.DataFrame:
 
     key = "N°DS"
     df = df[df[key].notna() & (df[key].str.strip() != "")]
+    rows_out = len(df)
+    logger.log(
+        "transform_filter", "success",
+        f"{rows_in} rows in, {rows_out} rows out, {rows_in - rows_out} dropped (missing {key})",
+    )
 
     return df
 
 
-def write_csv(df: pd.DataFrame) -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    print(f"✅ {len(df)} rows → {OUTPUT_CSV}")
-
-
-# ── CSV → Mongo ───────────────────────────────────────────────────────────────
-def extract_mongo_records(year: int) -> tuple[list[dict], object]:
-    if not OUTPUT_CSV.exists():
-        raise FileNotFoundError(f"❌ File not found: {OUTPUT_CSV}\n   CSV step must run first.")
-
-    records = csv_to_mongo_records(OUTPUT_CSV, DATE_COLUMNS)
+def extract_mongo_records(df: pd.DataFrame, year: int) -> tuple[list[dict], object]:
+    records = df_to_mongo_records(df, DATE_COLUMNS)
     year_records = [r for r in records if r.get("Date DS") is not None and r["Date DS"].year == year]
 
     if not year_records:
-        print(f"  ⚠️  No records found for year {year} in ds.csv")
         return [], None
 
     earliest_date = min(r["Date DS"] for r in year_records)
-    print(f"  📅 Earliest date in CSV: {earliest_date.date()}", flush=True)
-
-    print(f"  → {len(year_records)} records in CSV for year {year}", flush=True)
     return year_records, earliest_date
 
 
-def push_to_mongo(year: int) -> None:
-    records, earliest_date = extract_mongo_records(year)
+def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> None:
+    records, earliest_date = extract_mongo_records(df, year)
     if not records:
+        logger.log("mongo_push", "skipped", f"no records for year {year}")
         return
 
+    logger.log("mongo_connect", "started")
     db = get_mongo_db()
+    logger.log("mongo_connect", "success")
 
     before_count = db[COLLECTION].count_documents({})
-    print(f"  📊 Records in Atlas before refresh: {before_count}", flush=True)
 
+    logger.log("mongo_push", "started", f"{len(records)} records, earliest={earliest_date.date()}")
     date_scoped_reload(db, COLLECTION, records, "Date DS", earliest_date, year)
 
     after_count = db[COLLECTION].count_documents({})
     log_refresh_counts(before_count, after_count)
+    logger.log(
+        "mongo_push", "success",
+        f"before={before_count} after={after_count} diff={after_count - before_count}",
+    )
 
     db.client.close()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(file_bytes: bytes, year: int | None = None):
+def main(file_bytes: bytes, year: int | None = None, logger: PipelineLogger | None = None):
     year = year if year is not None else datetime.now().year
+    if logger is None:
+        logger = PipelineLogger(PIPELINE_NAME)
 
-    df = extract_transform(file_bytes)
-    write_csv(df)
-    push_to_mongo(year)
+    try:
+        df = extract_transform(file_bytes, logger)
+        push_to_mongo(df, year, logger)
+        logger.finish("success")
+    except BaseException as e:
+        logger.log("pipeline_error", "failed", str(e))
+        logger.finish("failed")
+        persist_run(logger)
+        raise
+    else:
+        persist_run(logger)
 
 
 if __name__ == "__main__":
@@ -143,4 +160,18 @@ if __name__ == "__main__":
         raise EnvironmentError("❌ GOOGLE_DRIVE_FOLDER_ID not set in .env")
 
     arg_year = int(sys.argv[1]) if len(sys.argv) > 1 else None
-    main(fetch_file(folder_id, FILENAME), arg_year)
+
+    run_logger = PipelineLogger(PIPELINE_NAME)
+    run_logger.log("drive_auth", "started")
+    try:
+        fetched_bytes = fetch_file(folder_id, FILENAME)
+    except Exception as e:
+        run_logger.log("drive_auth", "failed", str(e))
+        run_logger.finish("failed")
+        persist_run(run_logger)
+        raise
+    run_logger.log("drive_auth", "success")
+    run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
+    run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
+
+    main(fetched_bytes, arg_year, logger=run_logger)

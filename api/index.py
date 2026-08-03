@@ -1,0 +1,107 @@
+"""
+api/index.py
+-------------
+Vercel Python serverless function that triggers the avis ETL pipeline
+(Drive -> Mongo, no CSV intermediate) over HTTP, so a run can be kicked
+off from a phone browser or curl instead of only `python run.py` locally.
+Named index.py (not run-pipeline.py) because Vercel's Python runtime only
+recognizes a fixed set of entrypoint filenames under api/ — app.py,
+index.py, server.py, main.py, wsgi.py, asgi.py — so the route this
+function serves is /api, not /api/run-pipeline.
+
+Reuses run.py's run_all() directly rather than duplicating any
+fetch/transform/push/logging logic — this file is only an HTTP + auth
+wrapper around the existing, unmodified pipeline code. The JSON response
+includes each pipeline's run_id and step summary (from run_all()), so a
+run triggered here can be looked up afterward in the `pipeline_runs`
+Mongo collection the same way a local run.py run can.
+
+NOTE ON DURATION: Excel parsing plus multiple Mongo writes can exceed
+Vercel's default 10s function timeout, so `maxDuration` is bumped for
+this specific function in vercel.json (functions["api/index.py"]).
+"""
+
+import contextlib
+import hmac
+import io
+import json
+import os
+import sys
+import traceback
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+# run.py and lib/ live at the repo root, one level up from api/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from dotenv import load_dotenv
+
+import run as pipeline_run
+from lib.gdrive import get_latest_expected_files
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run_all_pipelines() -> list[dict]:
+    """Fetches all expected files from Drive once, then delegates the
+    per-pipeline run/log/persist loop entirely to run.run_all() -- so this
+    file doesn't duplicate that logic, and the response gets the same
+    run_id + step summary per pipeline that run.py's own console output
+    shows."""
+    load_dotenv(dotenv_path=ROOT / ".env")
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        raise EnvironmentError("GOOGLE_DRIVE_FOLDER_ID not set")
+
+    print(f"Fetching input files from Drive folder {folder_id}...\n")
+    files = get_latest_expected_files(folder_id)
+
+    return pipeline_run.run_all(files)
+
+
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self._handle()
+
+    def do_POST(self):
+        self._handle()
+
+    def _handle(self):
+        expected_token = os.getenv("PIPELINE_TRIGGER_SECRET")
+        query = parse_qs(urlparse(self.path).query)
+        token = (query.get("token") or [None])[0]
+
+        # Constant-time comparison; bail out before touching Drive/Mongo
+        # at all if the token is missing or wrong.
+        if not expected_token or not token or not hmac.compare_digest(token, expected_token):
+            self._respond(401, {"success": False, "error": "unauthorized"})
+            return
+
+        log_buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
+                results = _run_all_pipelines()
+        except Exception:
+            traceback.print_exc(file=log_buffer)
+            self._respond(500, {
+                "success": False,
+                "results": [],
+                "log": log_buffer.getvalue(),
+            })
+            return
+
+        any_failed = any(r["status"] == "failed" for r in results)
+        self._respond(200 if not any_failed else 207, {
+            "success": not any_failed,
+            "results": results,
+            "log": log_buffer.getvalue(),
+        })
+
+    def _respond(self, status_code: int, body: dict):
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)

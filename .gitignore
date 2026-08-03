@@ -31,10 +31,6 @@ build/
 # ── Outputs ───────────────────────────────────────────────────────────────────
 DS/
 
-# ── Output data (generated CSVs — keep folder, ignore contents) ──────────────
-output/*
-!output/.gitkeep
-
 # ── OS noise ──────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

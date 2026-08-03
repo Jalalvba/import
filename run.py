@@ -4,8 +4,16 @@ run.py
 ------
 Fetches the latest pipeline input files from the Google Drive folder
 (GOOGLE_DRIVE_FOLDER_ID in .env) ONCE, in memory, then runs each
-matching single-file pipeline (bytes -> CSV -> Mongo) for each file that
-was found, skipping pipelines whose input file is absent from Drive.
+matching single-file pipeline (bytes -> Mongo, no CSV intermediate) for
+each file that was found, skipping pipelines whose input file is absent
+from Drive.
+
+Every pipeline run -- found, skipped, succeeded, or failed -- gets a
+durable step-by-step log persisted as one document in the
+`pipeline_runs` Mongo collection (see lib/pipeline_log.py). run_all()
+returns each pipeline's run_id and step summary alongside its status, so
+a run can be looked up later; it's shared by main() below and by
+api/run-pipeline.py so the two don't duplicate this loop.
 
 Pipelines:
     YFACSCALDS.xlsx            → ds.py
@@ -28,6 +36,7 @@ import cp
 import ds
 import parc
 from lib.gdrive import get_latest_expected_files
+from lib.pipeline_log import PipelineLogger, persist_run
 
 # ── Pipeline map: Drive filename → single-file pipeline module ───────────────
 PIPELINES = [
@@ -56,19 +65,65 @@ PIPELINES = [
 ROOT = Path(__file__).parent
 
 
-def run_pipeline(pipeline: dict, file_bytes: bytes) -> bool:
+def run_pipeline(pipeline: dict, file_bytes: bytes, logger: PipelineLogger) -> bool:
     """Call a pipeline module's main() in-process. Returns True if successful.
     A pipeline's own sys.exit(1) on a failed Mongo push (cp.py/parc.py) is
     caught here too, so one pipeline failing doesn't kill run.py itself —
-    same behavior as the old subprocess-per-script return-code check."""
+    same behavior as the old subprocess-per-script return-code check. The
+    module's own main() is responsible for finishing + persisting the
+    logger's run document regardless of outcome."""
     try:
-        pipeline["module"].main(file_bytes)
+        pipeline["module"].main(file_bytes, logger=logger)
         return True
     except SystemExit as e:
         return e.code in (None, 0)
     except Exception:
         traceback.print_exc()
         return False
+
+
+def run_all(files: dict[str, bytes]) -> list[dict]:
+    """Run every pipeline whose input file is present in `files`. Every
+    pipeline -- found or skipped -- gets its own PipelineLogger and a
+    persisted pipeline_runs document. Returns one result dict per pipeline
+    with label, filename, status, run_id, and a compact step summary."""
+    found   = [p for p in PIPELINES if p["filename"] in files]
+    skipped = [p for p in PIPELINES if p["filename"] not in files]
+
+    results = []
+
+    for p in skipped:
+        logger = PipelineLogger(p["module"].__name__)
+        logger.log("file_download", "skipped", f"{p['filename']} not found in Drive folder")
+        logger.finish("skipped")
+        persist_run(logger)
+        results.append({
+            "label":    p["label"],
+            "filename": p["filename"],
+            "status":   "skipped",
+            "run_id":   logger.run_id,
+            "steps":    [f"{s['step']}:{s['status']}" for s in logger.steps],
+        })
+
+    for p in found:
+        module     = p["module"]
+        file_bytes = files[p["filename"]]
+
+        logger = PipelineLogger(module.__name__)
+        logger.log("drive_auth", "success", "authenticated with Drive service account")
+        logger.log("drive_listing", "success", f"found {len(files)} of {len(PIPELINES)} expected file(s) in Drive folder")
+        logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
+
+        ok = run_pipeline(p, file_bytes, logger)
+        results.append({
+            "label":    p["label"],
+            "filename": p["filename"],
+            "status":   "success" if ok else "failed",
+            "run_id":   logger.run_id,
+            "steps":    [f"{s['step']}:{s['status']}" for s in logger.steps],
+        })
+
+    return results
 
 
 def main():
@@ -79,42 +134,22 @@ def main():
 
     print(f"🔍 Fetching input files from Drive folder {folder_id}...\n")
     files = get_latest_expected_files(folder_id)
+    print(f"✅ Found {len(files)} file(s) to process\n")
 
-    found   = [p for p in PIPELINES if p["filename"] in files]
-    skipped = [p for p in PIPELINES if p["filename"] not in files]
+    results = run_all(files)
 
-    print(f"✅ Found {len(found)} file(s) to process:\n")
-    for p in found:
-        print(f"   • {p['filename']}  →  {p['label']}")
-    for p in skipped:
-        print(f"   ⚠️  {p['filename']}  →  {p['label']}  (not found in Drive — skipping)")
-    print()
-
-    errors = []
-
-    for pipeline in found:
-        label      = pipeline["label"]
-        module     = pipeline["module"]
-        file_bytes = files[pipeline["filename"]]
-
-        print(f"{'─' * 60}")
-        print(f"▶  {label}")
-        print(f"{'─' * 60}")
-
-        print(f"\n  ⚙️  Running {module.__name__}.py ...")
-        ok = run_pipeline(pipeline, file_bytes)
-        if not ok:
-            print(f"  ❌ {module.__name__}.py failed")
-            errors.append(f"{label} / {module.__name__}.py")
-        print()
-
-    print(f"{'═' * 60}")
+    print(f"\n{'═' * 60}")
+    errors = [r for r in results if r["status"] == "failed"]
     if errors:
-        print(f"⚠️  Completed with errors:")
-        for e in errors:
-            print(f"   - {e}")
+        print("⚠️  Completed with errors:")
+        for r in errors:
+            print(f"   - {r['label']}")
     else:
-        print(f"✅ All pipelines completed successfully.")
+        print("✅ All pipelines completed successfully.")
+    print()
+    print("Run IDs (see pipeline_runs collection for full step detail):")
+    for r in results:
+        print(f"   - {r['label']}: {r['run_id']} ({r['status']})")
     print(f"{'═' * 60}")
 
 
