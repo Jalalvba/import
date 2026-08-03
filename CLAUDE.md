@@ -106,6 +106,34 @@ db.pipeline_runs.find({ status: "failed" }).sort({ started_at: -1 })          //
 
 A step left at `"started"` with no matching `"success"`/`"failed"` entry after it means the run crashed mid-step — that's the first thing to look at when debugging a failure.
 
+## Vercel HTTP Trigger
+
+`api/index.py` is a Vercel Python serverless function that exposes `run.py`'s `run_all()` over HTTP — the pipeline can be triggered from a phone browser or `curl` instead of only `python run.py` locally. It reuses `run_all()` directly; it does not duplicate any fetch/transform/push/logging logic.
+
+**Endpoint URL pattern:**
+
+```
+https://<deployment-domain>/api?token=<PIPELINE_TRIGGER_SECRET>
+```
+
+`PIPELINE_TRIGGER_SECRET` is required as a query param (`?token=...`) and is checked with a constant-time comparison (`hmac.compare_digest`) against the `PIPELINE_TRIGGER_SECRET` env var set in Vercel's dashboard (Production, Preview, Development). A missing or wrong token returns `401` immediately, before Drive or Mongo are touched at all. Both `GET` and `POST` are accepted identically.
+
+> **⚠️ The URL+token combination is equivalent to a password for triggering real production Mongo writes.** Anyone with it can run all four pipelines against Atlas at will. Treat it with exactly the same care as `MONGODB_URI`:
+> - Never commit it to git, in any file, including examples or docs (`.env.example` uses placeholders only — see [AGENTS.md rule 1](./AGENTS.md)).
+> - Never paste the full URL+token into a shared doc, ticket, or chat that isn't already trusted with production Mongo access.
+> - Never log it anywhere retrievable (shell history included — see the Termux alias pattern below, which keeps the token in an exported env var rather than typed/pasted inline).
+> - If it leaks, rotate it immediately: generate a new value (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`), update `PIPELINE_TRIGGER_SECRET` in Vercel's dashboard for all three environments, and redeploy.
+
+**Looking up a specific run afterward:** the endpoint's JSON response includes a `run_id` per pipeline (`results[].run_id`). Look it up directly in Mongo:
+
+```js
+db.pipeline_runs.find_one({ run_id: "<id>" })
+```
+
+**Duration:** `maxDuration` is `180` (in `vercel.json`, `functions["api/index.py"]`). It started at `60` but a live production trigger hit that cap and was killed mid-run — DS/CP/PARC had already completed successfully, but BC never started, confirmed safe only because `bc`'s collection count matched its last known-good state (no partial `date_scoped_reload` delete-without-reinsert occurred). Real Drive + Mongo Atlas round trips from Vercel's `iad1` region run slower than a local run (~66s end-to-end for all four pipelines observed in testing), so `180` gives real headroom rather than being flush against the observed time.
+
+**Bundle size watch item:** the build log reports `Bundle size (228.12 MB) exceeds the standard size; optimizing dependencies` — Vercel's standard compressed-size limit is 250MB. It builds and deploys fine today, but there's limited headroom left; adding further heavy dependencies (another large Python package, a new SDK) could push this over the limit and break the build. Check the build log's bundle-size line after any `requirements.txt` change.
+
 ## Data & File Paths
 
 All paths below are relative to the repo root (wherever this project is checked out) — nothing is hardcoded to a fixed home-directory location, though older docstrings in some scripts still reference a prior `~/avis/` path from before the project was renamed.
@@ -140,6 +168,8 @@ MONGODB_DB=avis
 GOOGLE_SERVICE_ACCOUNT_KEY_B64=...   # base64 -w 0 of the full service account JSON key
 GOOGLE_DRIVE_FOLDER_ID=...           # the Drive folder ds.py/cp.py/parc.py/bc.py fetch input from
 ```
+
+`PIPELINE_TRIGGER_SECRET` is a separate, Vercel-only env var — it's not read from local `.env` (the four pipeline scripts and `run.py` never touch it), only from Vercel's dashboard by `api/index.py`. See [Vercel HTTP Trigger](#vercel-http-trigger) above.
 
 ## Where to find more detail
 
