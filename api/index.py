@@ -16,6 +16,23 @@ includes each pipeline's run_id and step summary (from run_all()), so a
 run triggered here can be looked up afterward in the `pipeline_runs`
 Mongo collection the same way a local run.py run can.
 
+This is still a single, synchronous Vercel invocation — one request in,
+one JSON response out only once every pipeline has finished (or the
+whole thing times out). It does NOT stream run_ids to the caller as
+each pipeline starts, so a frontend can't discover *this* request's
+run_ids until this response arrives, by which point every pipeline in
+it is already done (there's no "list currently-running pipelines"
+endpoint yet — only api/status.py's exact-run_id lookup). What
+incremental writes actually buy today: lib/pipeline_log.py now writes
+each step to Mongo as it happens rather than batching a pipeline's
+whole step log into one write at the end, so (a) a document survives
+with a partial step history even if the invocation is killed mid-run
+(e.g. a maxDuration timeout) instead of losing that pipeline's whole
+log the way the old batched write did, and (b) once a run_id IS known
+(from a completed response, or a future "list recent runs" endpoint),
+api/status.py shows its real per-step timeline rather than a single
+end-of-run snapshot.
+
 NOTE ON DURATION: running all four pipelines from Vercel's iad1 region
 took ~45s+ end-to-end against real Drive/Mongo Atlas traffic (slower
 than a local run) and blew past an initial maxDuration of 60, killing

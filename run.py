@@ -36,7 +36,7 @@ import cp
 import ds
 import parc
 from lib.gdrive import get_latest_expected_files
-from lib.pipeline_log import PipelineLogger, persist_run
+from lib.pipeline_log import PipelineLogger
 
 # ── Pipeline map: Drive filename → single-file pipeline module ───────────────
 PIPELINES = [
@@ -96,7 +96,6 @@ def run_all(files: dict[str, bytes]) -> list[dict]:
         logger = PipelineLogger(p["module"].__name__)
         logger.log("file_download", "skipped", f"{p['filename']} not found in Drive folder")
         logger.finish("skipped")
-        persist_run(logger)
         results.append({
             "label":    p["label"],
             "filename": p["filename"],

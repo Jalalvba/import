@@ -32,7 +32,7 @@ from pymongo.errors import PyMongoError
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
-from lib.pipeline_log import PipelineLogger, persist_run
+from lib.pipeline_log import PipelineLogger
 
 COLLECTION = "cp"
 FILENAME   = "ConditionParticulieres.xls"
@@ -200,10 +200,7 @@ def main(file_bytes: bytes, logger: PipelineLogger | None = None):
     except BaseException as e:
         logger.log("pipeline_error", "failed", str(e))
         logger.finish("failed")
-        persist_run(logger)
         raise
-    else:
-        persist_run(logger)
 
 
 if __name__ == "__main__":
@@ -221,7 +218,6 @@ if __name__ == "__main__":
     except Exception as e:
         run_logger.log("drive_auth", "failed", str(e))
         run_logger.finish("failed")
-        persist_run(run_logger)
         raise
     run_logger.log("drive_auth", "success")
     run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
