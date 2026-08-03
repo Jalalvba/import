@@ -1,20 +1,39 @@
 """
 api/index.py
 -------------
-Vercel Python serverless function that triggers the avis ETL pipeline
-(Drive -> Mongo, no CSV intermediate) over HTTP, so a run can be kicked
-off from a phone browser or curl instead of only `python run.py` locally.
-Named index.py (not run-pipeline.py) because Vercel's Python runtime only
-recognizes a fixed set of entrypoint filenames under api/ — app.py,
-index.py, server.py, main.py, wsgi.py, asgi.py — so the route this
-function serves is /api, not /api/run-pipeline.
+Vercel Python serverless function serving TWO routes for the avis ETL
+pipeline (Drive -> Mongo, no CSV intermediate):
+
+    GET/POST /api?token=<secret>            -- triggers a full pipeline run
+    GET/POST /api?token=<secret>&force=true  -- same, bypassing unchanged-skip
+    GET      /api/status?run_id=<uuid>       -- read-only progress poll, NO token
+
+Both routes are handled by this single file/class rather than living in
+separate api/index.py + api/status.py files. This is NOT a stylistic
+choice -- Vercel's Python runtime treats api/index.py as the sole
+entrypoint for the whole /api/* path (index.py, app.py, server.py,
+main.py, wsgi.py, asgi.py are the only filenames it recognizes as
+entrypoints at all), so a second file like api/status.py is never
+actually routed to; every request under /api/* -- including
+/api/status and even nonexistent paths -- hits this handler. A prior
+version of this project split status polling into its own api/status.py
+and it silently never worked: curl against /api/status returned the
+exact same 401 as the token-gated trigger route, because /api/status
+was resolving to this file's handler with no token check at all. If a
+future reader is tempted to "clean up" this file by splitting the
+status branch back out into its own api/status.py, don't -- it will
+reintroduce this exact bug. Route dispatch below is manual, based on
+parsing self.path (Vercel's BaseHTTPRequestHandler-style functions
+receive the full incoming request path, including query string, in
+self.path -- the same attribute the trigger logic already parses for
+its own query params).
 
 Reuses run.py's run_all() directly rather than duplicating any
-fetch/transform/push/logging logic — this file is only an HTTP + auth
-wrapper around the existing, unmodified pipeline code. The JSON response
-includes each pipeline's run_id and step summary (from run_all()), so a
-run triggered here can be looked up afterward in the `pipeline_runs`
-Mongo collection the same way a local run.py run can.
+fetch/transform/push/logging logic -- the trigger branch is only an
+HTTP + auth wrapper around the existing, unmodified pipeline code. The
+JSON response includes each pipeline's run_id and step summary (from
+run_all()), so a run triggered here can be looked up afterward via the
+/api/status route, or directly in the `pipeline_runs` Mongo collection.
 
 Skip-if-unchanged and size-tier handling live entirely in run_all() (see
 lib/pipeline_state.py, lib/size_check.py) -- this file just passes
@@ -25,28 +44,36 @@ source file:
 
     https://<deployment-domain>/api?token=<secret>&force=true
 
-The response's `results[].status` is one of "success" / "failed" /
-"skipped_absent" (file not in the Drive folder at all) /
+The trigger response's `results[].status` is one of "success" / "failed"
+/ "skipped_absent" (file not in the Drive folder at all) /
 "skipped_unchanged" (unchanged since the last successful run) -- a
 top-level `summary` dict tallies counts per status so a caller doesn't
 have to scan `results` to tell a real run from a no-op one.
 
-This is still a single, synchronous Vercel invocation — one request in,
-one JSON response out only once every pipeline has finished (or the
-whole thing times out). It does NOT stream run_ids to the caller as
-each pipeline starts, so a frontend can't discover *this* request's
-run_ids until this response arrives, by which point every pipeline in
-it is already done (there's no "list currently-running pipelines"
-endpoint yet — only api/status.py's exact-run_id lookup). What
-incremental writes actually buy today: lib/pipeline_log.py now writes
-each step to Mongo as it happens rather than batching a pipeline's
-whole step log into one write at the end, so (a) a document survives
-with a partial step history even if the invocation is killed mid-run
-(e.g. a maxDuration timeout) instead of losing that pipeline's whole
-log the way the old batched write did, and (b) once a run_id IS known
-(from a completed response, or a future "list recent runs" endpoint),
-api/status.py shows its real per-step timeline rather than a single
-end-of-run snapshot.
+The trigger route is still a single, synchronous Vercel invocation --
+one request in, one JSON response out only once every pipeline has
+finished (or the whole thing times out). It does NOT stream run_ids to
+the caller as each pipeline starts, so a frontend can't discover *this*
+request's run_ids until this response arrives, by which point every
+pipeline in it is already done. What incremental writes actually buy
+today: lib/pipeline_log.py writes each step to Mongo as it happens
+rather than batching a pipeline's whole step log into one write at the
+end, so (a) a document survives with a partial step history even if the
+invocation is killed mid-run (e.g. a maxDuration timeout) instead of
+losing that pipeline's whole log the way an old batched write would,
+and (b) once a run_id IS known (from a completed trigger response, or a
+future "list recent runs" endpoint), the /api/status route shows its
+real per-step timeline rather than a single end-of-run snapshot.
+
+The /api/status route requires no auth token, unlike the trigger route
+-- this is deliberate, not an oversight. Read-only status lookups don't
+trigger Drive fetches or Mongo writes to the actual fleet-data
+collections, and run_id is a random UUID4 (122 bits of entropy)
+generated server-side and never guessable, so it functions as its own
+unguessable capability token: you can only look up a run you already
+know the run_id of (e.g. from a prior trigger response). If that
+tradeoff ever needs to change, add the same token check the trigger
+route uses.
 
 NOTE ON DURATION: running all four pipelines from Vercel's iad1 region
 took ~45s+ end-to-end against real Drive/Mongo Atlas traffic (slower
@@ -75,6 +102,7 @@ from dotenv import load_dotenv
 
 import run as pipeline_run
 from lib.gdrive import list_expected_files
+from lib.pipeline_log import get_run_status
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -104,6 +132,39 @@ class handler(BaseHTTPRequestHandler):
         self._handle()
 
     def _handle(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+
+        if path == "/api/status":
+            self._handle_status()
+        elif path in ("/api", "/api/index"):
+            self._handle_trigger()
+        else:
+            self._respond(404, {"success": False, "error": "not found"})
+
+    def _handle_status(self):
+        load_dotenv(dotenv_path=ROOT / ".env")
+
+        query = parse_qs(urlparse(self.path).query)
+        run_id = (query.get("run_id") or [None])[0]
+
+        if not run_id:
+            self._respond(400, {"error": "run_id query param is required"})
+            return
+
+        try:
+            doc = get_run_status(run_id)
+        except Exception as e:
+            self._respond(500, {"error": f"could not read run status: {e}"})
+            return
+
+        if doc is None:
+            self._respond(404, {"error": f"no run found for run_id {run_id}"})
+            return
+
+        doc.pop("_id", None)
+        self._respond(200, doc)
+
+    def _handle_trigger(self):
         expected_token = os.getenv("PIPELINE_TRIGGER_SECRET")
         query = parse_qs(urlparse(self.path).query)
         token = (query.get("token") or [None])[0]
@@ -141,7 +202,7 @@ class handler(BaseHTTPRequestHandler):
         })
 
     def _respond(self, status_code: int, body: dict):
-        payload = json.dumps(body).encode("utf-8")
+        payload = json.dumps(body, default=str).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
