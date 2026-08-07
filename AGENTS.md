@@ -35,6 +35,24 @@ detail — this file states the rule, not the case for it.
    through end-of-year — records before that date are intentionally left
    untouched. Never "fix" this into a full drop+reload without an
    explicit decision to do so; it's a deliberate scope limit, not a gap.
+   **Safety guarantee, precisely stated:** `atomic_reload()` (rule 2) and
+   `date_scoped_reload()` protect the live collection by two different
+   mechanisms, not the same one — don't assume either implies the other's
+   properties. `atomic_reload()` never touches the live collection until
+   the full replacement set is staged and verified elsewhere, then swaps
+   in via `rename()`. `date_scoped_reload()` instead deletes and inserts
+   directly against the live collection, wrapped in a single Mongo
+   multi-document transaction (`session.with_transaction()`, viable
+   because Atlas clusters always run as a replica set) — if the insert
+   fails after the delete, the whole transaction aborts and the delete is
+   rolled back, so the window is never left empty. This was **not always
+   true**: before the fix landed, `date_scoped_reload()` ran a bare
+   `delete_many()` then `insert_many()` with no transaction and no
+   rollback, so an `insert_many()` failure after a successful
+   `delete_many()` permanently lost that date window. If you're touching
+   `date_scoped_reload()`, keep the delete+insert pair inside the
+   transaction — pulling either call out of the `session.with_transaction`
+   callback reintroduces the original bug.
 
 4. **`bc.py`'s Mongo push is new** — until the ETL restructuring, `bc`
    had no Mongo path at all (`bc_csv.py` only generated a CSV). It now

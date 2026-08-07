@@ -45,7 +45,17 @@ python run.py
 
 Lists all four expected filenames' **metadata** from the Drive folder **once** (a single Drive listing pass, no bytes downloaded yet — so running all four pipelines together costs one Drive round trip, not four), skips pipelines whose input file is absent from Drive (`YBONTEC.xlsx` is optional; the other three are required and `run.py` raises if any of them is missing), then for each present file checks `pipeline_state` and downloads + calls the matching pipeline module's `main()` in-process only if the file has actually changed since the last successful run (or `PIPELINE_FORCE_RUN=1` is set — see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection)). Continues to the next pipeline if one fails — a pipeline's own `sys.exit(1)` on a failed Mongo push no longer terminates `run.py`, since pipelines are called as in-process functions rather than subprocesses. `run.py`'s summary output distinguishes four outcomes per pipeline: `success` / `failed` / `skipped_absent` (file not in Drive) / `skipped_unchanged` (file unchanged since last success).
 
-There are no tests, linters, or CI configured.
+A `tests/` pytest suite exists for the highest-risk logic (Mongo write
+safety, auth checks, skip-if-unchanged). Run it with:
+
+```bash
+pip install -r requirements.txt
+pytest tests/
+```
+
+Every test mocks Drive/Mongo entirely (via `mongomock` and hand-rolled
+fakes in `tests/conftest.py`) — no `.env`, no network, no real credentials
+required. There are no linters or CI configured.
 
 ## Architecture
 

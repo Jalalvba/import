@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 
 def get_mongo_db(env_path: Path | None = None):
@@ -87,19 +88,38 @@ def atomic_reload(db, collection_name: str, records: list[dict], index_specs) ->
         raise
 
 
+def _run_date_scoped_reload(col, records: list[dict], date_field: str, earliest_date, end, session=None) -> int:
+    """The delete+insert pair, factored out so it can run either inside a
+    real Mongo transaction (session set) or be exercised directly by tests
+    against a fake transactional double. Not called directly outside this
+    module."""
+    result = col.delete_many({date_field: {"$gte": earliest_date, "$lt": end}}, session=session)
+    if records:
+        col.insert_many(records, session=session)
+    return result.deleted_count
+
+
 def date_scoped_reload(db, collection_name: str, records: list[dict], date_field: str, earliest_date, year: int) -> None:
     """Delete [earliest_date, end-of-year) from collection_name, then
-    insert records. Records outside that window (i.e. before
-    earliest_date) are intentionally left untouched — this is a partial,
-    date-bounded refresh, not a full reload."""
+    insert records, as a single Mongo multi-document transaction — Atlas
+    clusters always run as a replica set, so transactions are supported.
+    If insert_many fails after delete_many, the transaction aborts and the
+    delete is rolled back, instead of permanently losing the date window.
+    Records outside that window (i.e. before earliest_date) are
+    intentionally left untouched — this is a partial, date-bounded
+    refresh, not a full reload."""
     col = db[collection_name]
     end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
 
-    result = col.delete_many({date_field: {"$gte": earliest_date, "$lt": end}})
-    print(f"  🗑️  Deleted {result.deleted_count} records from {earliest_date.date()} to end of {year}", flush=True)
+    try:
+        with db.client.start_session() as session:
+            deleted_count = session.with_transaction(
+                lambda s: _run_date_scoped_reload(col, records, date_field, earliest_date, end, session=s)
+            )
+    except PyMongoError as e:
+        raise RuntimeError(f"date_scoped_reload failed for '{collection_name}': {e}") from e
 
-    if records:
-        col.insert_many(records)
+    print(f"  🗑️  Deleted {deleted_count} records from {earliest_date.date()} to end of {year}", flush=True)
     print(f"  ✅ Inserted {len(records)} records for {year}", flush=True)
 
 

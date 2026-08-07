@@ -30,6 +30,8 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
+from pymongo.errors import PyMongoError
+
 from lib.transform import BC_DS_FORMATS, clean_val, format_date
 from lib.validate import validate_columns
 from lib.mongo import df_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
@@ -120,7 +122,12 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> None:
     before_count = db[COLLECTION].count_documents({})
 
     logger.log("mongo_push", "started", f"{len(records)} records, earliest={earliest_date.date()}")
-    date_scoped_reload(db, COLLECTION, records, "Date DS", earliest_date, year)
+    try:
+        date_scoped_reload(db, COLLECTION, records, "Date DS", earliest_date, year)
+    except (PyMongoError, RuntimeError) as e:
+        logger.log("mongo_push", "failed", f"'{COLLECTION}' window [{earliest_date.date()}, {year}] left untouched: {e}")
+        db.client.close()
+        sys.exit(1)
 
     after_count = db[COLLECTION].count_documents({})
     log_refresh_counts(before_count, after_count)
