@@ -15,10 +15,16 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 
+def _is_termux() -> bool:
+    """Termux (Android) sets $PREFIX to its own /data/data/com.termux/...
+    sandbox path -- a reliable, environment-specific signal, unlike
+    checking for the absence of some other variable."""
+    return os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
+
+
 def get_mongo_db(env_path: Path | None = None):
-    """Load .env, apply the DNS resolver workaround (Termux compatibility),
-    and return a connected pymongo Database handle. Callers close the
-    connection via db.client.close()."""
+    """Load .env and return a connected pymongo Database handle. Callers
+    close the connection via db.client.close()."""
     if env_path is None:
         env_path = Path(__file__).resolve().parent.parent / ".env"
     load_dotenv(dotenv_path=env_path)
@@ -28,9 +34,15 @@ def get_mongo_db(env_path: Path | None = None):
     if not uri or not db_name:
         raise EnvironmentError("❌ MONGODB_URI or MONGODB_DB not set in .env")
 
-    import dns.resolver
-    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
-    dns.resolver.default_resolver.nameservers = ["8.8.8.8"]
+    if _is_termux():
+        # Termux's bundled resolver can't resolve the SRV/TXT records
+        # mongodb+srv:// URIs need; forcing 8.8.8.8 works around that.
+        # Scoped to Termux only -- applying this unconditionally (as it
+        # used to be) meant Vercel's runtime got its process-global DNS
+        # resolver silently overridden for no reason it ever needed.
+        import dns.resolver
+        dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+        dns.resolver.default_resolver.nameservers = ["8.8.8.8"]
 
     client = MongoClient(uri)
     return client[db_name]
@@ -78,12 +90,25 @@ def atomic_reload(db, collection_name: str, records: list[dict], index_specs) ->
     each get their own staging collection and can't stomp on each other's
     in-progress staged data. See lib/pipeline_state.py's run lock for the
     complementary guard against overlapping runs actually racing to the
-    final rename."""
+    final rename.
+
+    Refuses to run at all if records is empty -- every caller already
+    guards this individually before calling (checking for zero records
+    and logging mongo_push:skipped instead), but this is defense-in-depth
+    at the primitive itself: a caller that ever forgot that guard would
+    otherwise have this rename an empty collection over live production
+    data, verified successfully (0 == 0) the whole way."""
+    if not records:
+        raise ValueError(
+            f"atomic_reload() refused to run for '{collection_name}': records is empty -- "
+            f"this would replace the live collection with nothing. Callers must check for "
+            f"zero records before calling."
+        )
+
     staging_name = f"{collection_name}_staging_{uuid.uuid4().hex[:8]}"
     db[staging_name].drop()
     try:
-        if records:
-            db[staging_name].insert_many(records)
+        db[staging_name].insert_many(records)
         staged_count = db[staging_name].count_documents({})
         if staged_count != len(records):
             raise RuntimeError(

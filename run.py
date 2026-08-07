@@ -133,8 +133,13 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
         meta = file_metadata[p["filename"]]
 
         logger = PipelineLogger(pipeline_name)
-        logger.log("drive_auth", "success", "authenticated with Drive service account")
-        logger.log("drive_listing", "success", f"found {len(file_metadata)} of {len(PIPELINES)} expected file(s) in Drive folder")
+        # Auth genuinely happened once, earlier -- inside the single shared
+        # list_expected_files() call in main()/_run_all_pipelines() -- not
+        # per-pipeline here. Logging "authenticated" again per pipeline
+        # would misrepresent what actually happened in each pipeline's own
+        # run_id scope; this reflects reuse instead.
+        logger.log("drive_auth", "success", "reused the Drive session already authenticated by this run's shared file listing")
+        logger.log("drive_listing", "success", f"found {len(file_metadata)} of {len(PIPELINES)} expected file(s) in Drive folder (from the shared listing pass)")
 
         decision = resolve_pipeline_run(pipeline_name, meta, logger, force=force)
         if decision in ("skip_unchanged", "hard_fail", "already_running"):

@@ -19,10 +19,23 @@ and Mongo is never more than one step behind the console.
 """
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
 from lib.mongo import get_mongo_db
+
+# /api/status serves a run's step detail text unauthenticated. pymongo
+# scrubs credentials from its own exception messages today, so no
+# connection string has actually leaked through this path -- but this is
+# cheap insurance against a future exception type (or a future pymongo
+# version) that doesn't. Matches mongodb:// and mongodb+srv:// URIs
+# anywhere in a string and redacts everything after the scheme.
+_CONNECTION_STRING_RE = re.compile(r"mongodb(\+srv)?://\S+", re.IGNORECASE)
+
+
+def _sanitize(detail: str) -> str:
+    return _CONNECTION_STRING_RE.sub("mongodb://[REDACTED]", detail)
 
 _STATUS_MARKERS = {
     "started": "▶",
@@ -84,6 +97,7 @@ class PipelineLogger:
         col.create_index(_TTL_FIELD, expireAfterSeconds=_TTL_SECONDS)
 
     def log(self, step: str, status: str, detail: str = "") -> None:
+        detail = _sanitize(detail)
         entry = {
             "step": step,
             "timestamp": datetime.now(timezone.utc),

@@ -129,11 +129,20 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     # field from a different row in the same WW group. Mixing an end date
     # from one row with the start date/vehicle details of another produced
     # "chimera" records describing a contract that occurred in no single
-    # source row.
-    df = df.sort_values(["_ww_key", "_real_imm", "_sort_date"], ascending=[True, False, False])
+    # source row. "NUM chassis" is a final tiebreak so the pick is
+    # deterministic independent of source row order -- without it, a tie on
+    # both real-IMM and end date (e.g. two rows neither with a real IMM,
+    # same end date) fell back on pandas' stable sort preserving whatever
+    # order Excel happened to export rows in, which isn't guaranteed to
+    # stay consistent across re-exports of the same underlying data.
+    df["_chassis_key"] = df["NUM chassis"].apply(lambda x: str(x).strip())
+    df = df.sort_values(
+        ["_ww_key", "_real_imm", "_sort_date", "_chassis_key"],
+        ascending=[True, False, False, True],
+    )
     df = df.drop_duplicates(subset=["_ww_key"], keep="first")
 
-    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key"])
+    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key", "_chassis_key"])
 
     for col in [c.strip() for c in DATE_COLUMNS]:
         if col in df.columns:
