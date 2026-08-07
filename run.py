@@ -72,21 +72,28 @@ PIPELINES = [
 ROOT = Path(__file__).parent
 
 
-def run_pipeline(pipeline: dict, file_bytes: bytes, logger: PipelineLogger) -> bool:
-    """Call a pipeline module's main() in-process. Returns True if successful.
-    A pipeline's own sys.exit(1) on a failed Mongo push (cp.py/parc.py) is
-    caught here too, so one pipeline failing doesn't kill run.py itself —
-    same behavior as the old subprocess-per-script return-code check. The
-    module's own main() is responsible for finishing + persisting the
-    logger's run document regardless of outcome."""
+def run_pipeline(pipeline: dict, file_bytes: bytes, logger: PipelineLogger) -> str:
+    """Call a pipeline module's main() in-process. Returns "success",
+    "skipped_empty" (zero usable records in the source file --
+    pipeline_state must NOT be updated for this, so the next trigger
+    genuinely retries instead of trusting a false "already processed"
+    state), or "failed". A pipeline's own sys.exit(1) on a failed Mongo
+    push is caught here too, so one pipeline failing doesn't kill run.py
+    itself — same behavior as the old subprocess-per-script return-code
+    check. The module's own main() is responsible for finishing +
+    persisting the logger's run document regardless of outcome."""
     try:
-        pipeline["module"].main(file_bytes, logger=logger)
-        return True
+        status = pipeline["module"].main(file_bytes, logger=logger)
+        if status == "success":
+            return "success"
+        if status == "skipped":
+            return "skipped_empty"
+        return "failed"
     except SystemExit as e:
-        return e.code in (None, 0)
+        return "success" if e.code in (None, 0) else "failed"
     except Exception:
         traceback.print_exc()
-        return False
+        return "failed"
 
 
 def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
@@ -97,7 +104,12 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
     result dict per pipeline with label, filename, status, run_id, and a
     compact step summary. Status is one of: "success", "failed",
     "skipped_absent" (file not in Drive at all), "skipped_unchanged"
-    (unchanged since the last successful run -- see lib.pipeline_state)."""
+    (unchanged since the last successful run, or another run for this
+    pipeline currently holds the lock -- see lib.pipeline_state),
+    "skipped_empty" (the source file parsed to zero usable records --
+    pipeline_state is deliberately NOT updated for this outcome, so the
+    next trigger retries rather than trusting a false "already
+    processed" state)."""
     found  = [p for p in PIPELINES if p["filename"] in file_metadata]
     absent = [p for p in PIPELINES if p["filename"] not in file_metadata]
 
@@ -139,8 +151,8 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
             file_bytes = download_file_bytes(meta["id"])
             logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
 
-            ok = run_pipeline(p, file_bytes, logger)
-            if ok:
+            run_status = run_pipeline(p, file_bytes, logger)
+            if run_status == "success":
                 update_state(pipeline_name, p["filename"], meta["id"], meta["modifiedTime"], logger.run_id)
         finally:
             # Always release the lock resolve_pipeline_run acquired above,
@@ -149,7 +161,7 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
         results.append({
             "label":    p["label"],
             "filename": p["filename"],
-            "status":   "success" if ok else "failed",
+            "status":   run_status,
             "run_id":   logger.run_id,
             "steps":    [f"{s['step']}:{s['status']}" for s in logger.steps],
         })
@@ -173,7 +185,7 @@ def main():
 
     results = run_all(file_metadata, force=force)
 
-    tally = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "failed": 0}
+    tally = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "skipped_empty": 0, "failed": 0}
     for r in results:
         tally[r["status"]] += 1
 
@@ -182,6 +194,7 @@ def main():
         f"✅ {tally['success']} succeeded, "
         f"⏭️  {tally['skipped_unchanged']} skipped (unchanged), "
         f"📭 {tally['skipped_absent']} skipped (absent), "
+        f"🗒️  {tally['skipped_empty']} skipped (zero records), "
         f"❌ {tally['failed']} failed"
     )
     print()

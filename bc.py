@@ -123,11 +123,14 @@ def extract_mongo_records(df: pd.DataFrame, year: int) -> tuple[list[dict], obje
     return year_records, earliest_date
 
 
-def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> None:
+def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
+    """Returns True if records were actually pushed, False if the run was
+    skipped for having zero records -- callers must not treat a False
+    return as a success (see main())."""
     records, earliest_date = extract_mongo_records(df, year)
     if not records:
         logger.log("mongo_push", "skipped", f"no records for year {year}")
-        return
+        return False
 
     logger.log("mongo_connect", "started")
     db = get_mongo_db()
@@ -151,18 +154,25 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> None:
     )
 
     db.client.close()
+    return True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(file_bytes: bytes, year: int | None = None, logger: PipelineLogger | None = None):
+def main(file_bytes: bytes, year: int | None = None, logger: PipelineLogger | None = None) -> str:
+    """Returns the run's finish status: "success" (pushed), "skipped"
+    (zero usable records -- pipeline_state must NOT be updated for this,
+    so the next trigger genuinely retries instead of trusting a false
+    "already processed" state), or raises on failure."""
     year = year if year is not None else datetime.now().year
     if logger is None:
         logger = PipelineLogger(PIPELINE_NAME)
 
     try:
         df = extract_transform(file_bytes, logger)
-        push_to_mongo(df, year, logger)
-        logger.finish("success")
+        pushed = push_to_mongo(df, year, logger)
+        status = "success" if pushed else "skipped"
+        logger.finish(status)
+        return status
     except BaseException as e:
         logger.log("pipeline_error", "failed", str(e))
         logger.finish("failed")
@@ -207,10 +217,11 @@ if __name__ == "__main__":
         run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
 
         try:
-            main(fetched_bytes, arg_year, logger=run_logger)
+            status = main(fetched_bytes, arg_year, logger=run_logger)
         except BaseException:
             raise
         else:
-            update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+            if status == "success":
+                update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
     finally:
         release_lock(PIPELINE_NAME, run_logger.run_id)

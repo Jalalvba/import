@@ -46,9 +46,12 @@ source file:
 
 The trigger response's `results[].status` is one of "success" / "failed"
 / "skipped_absent" (file not in the Drive folder at all) /
-"skipped_unchanged" (unchanged since the last successful run) -- a
-top-level `summary` dict tallies counts per status so a caller doesn't
-have to scan `results` to tell a real run from a no-op one.
+"skipped_unchanged" (unchanged since the last successful run, or another
+run for this pipeline currently holds the lock) / "skipped_empty" (the
+source file parsed to zero usable records -- pipeline_state is
+deliberately not updated for this outcome, so the next trigger retries)
+-- a top-level `summary` dict tallies counts per status so a caller
+doesn't have to scan `results` to tell a real run from a no-op one.
 
 The trigger route is still a single, synchronous Vercel invocation --
 one request in, one JSON response out only once every pipeline has
@@ -197,7 +200,7 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        summary = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "failed": 0}
+        summary = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "skipped_empty": 0, "failed": 0}
         for r in results:
             summary[r["status"]] += 1
 
