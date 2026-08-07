@@ -120,6 +120,8 @@ db.pipeline_runs.find({ status: "failed" }).sort({ started_at: -1 })          //
 
 A step left at `"started"` with no matching `"success"`/`"failed"` entry after it means the run crashed mid-step — that's the first thing to look at when debugging a failure.
 
+**Indexes:** `lib/pipeline_log.py`'s `PipelineLogger` lazily creates two indexes on `pipeline_runs` on first write of a run (idempotent, no-op once they exist): a unique index on `run_id` (so `/api/status` lookups — high-traffic since it's unauthenticated — aren't a full collection scan), and a TTL index on `started_at` with a 90-day expiry (`expireAfterSeconds`), so the collection doesn't grow unbounded from an unauthenticated, free-to-hit endpoint. Old run documents past 90 days are pruned automatically by Mongo; there's no manual cleanup step.
+
 ## Skip-if-unchanged (`pipeline_state` collection)
 
 The `pipeline_state` collection holds exactly one document per pipeline

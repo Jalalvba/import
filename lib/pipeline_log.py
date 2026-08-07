@@ -34,6 +34,15 @@ _STATUS_MARKERS = {
 
 _COLLECTION = "pipeline_runs"
 
+# /api/status is unauthenticated and does a point lookup by run_id on
+# every call -- without an index that's a full collection scan, and the
+# collection grows 4 documents per trigger forever. A unique index on
+# run_id fixes the scan; a TTL index on started_at auto-prunes documents
+# older than 90 days so the collection doesn't grow unbounded.
+_RUN_ID_INDEX = "run_id"
+_TTL_FIELD = "started_at"
+_TTL_SECONDS = 90 * 24 * 3600
+
 
 def _triggered_from() -> str:
     return "vercel" if os.getenv("VERCEL") else "local"
@@ -66,6 +75,14 @@ class PipelineLogger:
             self._db = get_mongo_db()
         return self._db[_COLLECTION]
 
+    @staticmethod
+    def _ensure_indexes(col) -> None:
+        # Idempotent -- a no-op once these already exist. Created lazily
+        # here (on first write) rather than at import time, since that
+        # would require a Mongo connection just to import this module.
+        col.create_index(_RUN_ID_INDEX, unique=True)
+        col.create_index(_TTL_FIELD, expireAfterSeconds=_TTL_SECONDS)
+
     def log(self, step: str, status: str, detail: str = "") -> None:
         entry = {
             "step": step,
@@ -84,6 +101,7 @@ class PipelineLogger:
         try:
             col = self._collection()
             if not self._inserted:
+                self._ensure_indexes(col)
                 col.insert_one({
                     "run_id": self.run_id,
                     "pipeline": self.pipeline,
@@ -112,6 +130,7 @@ class PipelineLogger:
                 # calls shouldn't normally happen (every code path logs at
                 # least one step, even on an immediate failure), but insert
                 # the full document rather than silently losing the run.
+                self._ensure_indexes(col)
                 col.insert_one(self.to_document())
                 self._inserted = True
             else:
