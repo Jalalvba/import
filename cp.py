@@ -5,11 +5,13 @@ cp.py
 End-to-end CP (contract particulars) pipeline: reads
 ConditionParticulieres.xls fetched from the Google Drive folder
 (GOOGLE_DRIVE_FOLDER_ID in .env), extracts needed columns, cleans and
-normalizes all fields, deduplicates by IMM keeping the row with the
-latest Date fin contrat, then pushes a full atomic reload directly to
-the `cp` MongoDB collection -- no CSV intermediate. Every run's full
-step-by-step breakdown is persisted as one document in the
-`pipeline_runs` collection (see lib/pipeline_log.py).
+normalizes all fields, deduplicates by WW keeping ONE whole representative
+row per WW (real IMM preferred over a WW-style placeholder, then latest
+Date fin contrat as a tiebreak) -- every kept field comes from that same
+row, never mixed across rows in the group -- then pushes a full atomic
+reload directly to the `cp` MongoDB collection -- no CSV intermediate.
+Every run's full step-by-step breakdown is persisted as one document in
+the `pipeline_runs` collection (see lib/pipeline_log.py).
 
 Usage:
     python cp.py
@@ -121,23 +123,17 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     # Drop rows where WW is empty
     df = df[~df["_ww_key"].isin(["", "nan"])]
 
-    # For each WW group: get the latest Date fin contrat
-    latest_date = (
-        df.groupby("_ww_key")["Date fin contrat"]
-        .apply(lambda s: s.iloc[s.apply(parse_date_for_sort).argmax()])
-        .reset_index()
-        .rename(columns={"Date fin contrat": "_latest_fin"})
-    )
-
-    # Pick the best representative row per WW: real IMM first, then latest date
+    # Pick ONE representative row per WW: real IMM first, then latest
+    # Date fin contrat as a tiebreak -- and keep ALL of that row's fields
+    # together (start date, end date, vehicle type, ...), never hoisting a
+    # field from a different row in the same WW group. Mixing an end date
+    # from one row with the start date/vehicle details of another produced
+    # "chimera" records describing a contract that occurred in no single
+    # source row.
     df = df.sort_values(["_ww_key", "_real_imm", "_sort_date"], ascending=[True, False, False])
     df = df.drop_duplicates(subset=["_ww_key"], keep="first")
 
-    # Merge latest Date fin contrat back in
-    df = df.merge(latest_date, on="_ww_key", how="left")
-    df["Date fin contrat"] = df["_latest_fin"]
-
-    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key", "_latest_fin"])
+    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key"])
 
     for col in [c.strip() for c in DATE_COLUMNS]:
         if col in df.columns:
