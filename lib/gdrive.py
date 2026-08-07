@@ -121,6 +121,28 @@ def download_file_bytes(file_id: str) -> bytes:
     return buffer.getvalue()
 
 
+def verify_download_size(file_bytes: bytes, file_meta: dict) -> None:
+    """Raise ValueError if file_bytes' length doesn't match Drive's own
+    reported `size` for this file (already fetched in file_meta, otherwise
+    unused). A short read that Drive terminates as a clean 200 could
+    otherwise yield a truncated file that calamine/openpyxl silently parses
+    as fewer rows rather than erroring -- shipping partial data. A no-op if
+    Drive didn't report a size at all (native Google Docs types omit it;
+    never true for the .xlsx/.xls files this project downloads, but
+    tolerated rather than treated as a mismatch)."""
+    expected = file_meta.get("size")
+    if not expected:
+        return
+    actual = len(file_bytes)
+    expected = int(expected)
+    if actual != expected:
+        raise ValueError(
+            f"❌ downloaded {actual:,} bytes for '{file_meta.get('name', file_meta.get('id'))}' "
+            f"but Drive reported {expected:,} bytes -- likely a truncated/short download, not a "
+            f"safe file to process"
+        )
+
+
 def _latest_by_name(files: list[dict], names: set[str]) -> dict[str, dict]:
     """Filter files to those whose name is in names, then dedupe by name —
     keeping the entry with the latest modifiedTime when a name repeats."""

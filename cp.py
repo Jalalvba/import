@@ -214,7 +214,7 @@ def main(file_bytes: bytes, logger: PipelineLogger | None = None) -> str:
 
 
 if __name__ == "__main__":
-    from lib.gdrive import download_file_bytes, find_file_metadata
+    from lib.gdrive import download_file_bytes, find_file_metadata, verify_download_size
     from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
@@ -246,6 +246,12 @@ if __name__ == "__main__":
 
     try:
         fetched_bytes = download_file_bytes(file_meta["id"])
+        try:
+            verify_download_size(fetched_bytes, file_meta)
+        except ValueError as e:
+            run_logger.log("file_download", "failed", str(e))
+            run_logger.finish("failed")
+            raise
         run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
 
         try:

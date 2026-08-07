@@ -41,7 +41,7 @@ import bc
 import cp
 import ds
 import parc
-from lib.gdrive import download_file_bytes, list_expected_files
+from lib.gdrive import download_file_bytes, list_expected_files, verify_download_size
 from lib.pipeline_log import PipelineLogger
 from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
@@ -149,11 +149,17 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
 
         try:
             file_bytes = download_file_bytes(meta["id"])
-            logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
-
-            run_status = run_pipeline(p, file_bytes, logger)
-            if run_status == "success":
-                update_state(pipeline_name, p["filename"], meta["id"], meta["modifiedTime"], logger.run_id)
+            try:
+                verify_download_size(file_bytes, meta)
+            except ValueError as e:
+                logger.log("file_download", "failed", str(e))
+                logger.finish("failed")
+                run_status = "failed"
+            else:
+                logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
+                run_status = run_pipeline(p, file_bytes, logger)
+                if run_status == "success":
+                    update_state(pipeline_name, p["filename"], meta["id"], meta["modifiedTime"], logger.run_id)
         finally:
             # Always release the lock resolve_pipeline_run acquired above,
             # success or failure, so a crash here can't deadlock the next run.
