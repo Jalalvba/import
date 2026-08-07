@@ -75,7 +75,23 @@ detail — this file states the rule, not the case for it.
    64219/64219 (diff 0). Prior runs had only ever exercised it against
    synthetic data. `run.py` still skips `bc.py` cleanly (no error) when
    `YBONTEC.xlsx` is absent from the Drive folder, matching its old
-   local-`input/`-absent skip behavior.
+   local-`input/`-absent skip behavior. **Sharper caution, per a later
+   production `pipeline_runs` review:** as of that review, `bc.py` had
+   only ever successfully *ingested* that one distinct `YBONTEC.xlsx`
+   export on 2026-08-03 — every run since had been a `skip_unchanged`
+   against that same file, not a fresh ingest. That means
+   `date_scoped_reload()`'s delete+insert path for `bc` (now
+   transaction-wrapped, see rule 3) has never actually been exercised
+   against a second, *genuinely different or overlapping* `YBONTEC.xlsx`
+   export — only against the one file, once. Treat any future `bc.py` run
+   that processes a materially different export as effectively
+   unverified in practice until it succeeds and its before/after counts
+   are spot-checked, regardless of how much testing the code path itself
+   has had via `ds.py` (same function, different collection/data
+   patterns). Re-confirm this claim against `pipeline_runs` directly
+   (`db.pipeline_runs.find({ pipeline: "bc" }).sort({ started_at: -1 })`)
+   before relying on it, since it will go stale the next time `bc.py`
+   actually ingests a changed file.
 
 5. **All four pipeline scripts (`ds.py`, `cp.py`, `bc.py`, `parc.py`) fail
    loudly on missing required columns**, via `lib/validate.py`'s
@@ -152,7 +168,7 @@ This project uses two AI tools with strictly separated roles:
 - Factual claims about input file structure, MongoDB collection state,
   or pipeline failure causes must be checked against real, live data
   (`git diff`, a direct read of the source Excel — Claude Code has Drive
-  access via `lib/gdrive.py`/`test_gdrive_download.py`, unlike Gemini/
+  access via `lib/gdrive.py`/`scripts/gdrive_download_check.py`, unlike Gemini/
   Antigravity — a direct MongoDB query, or an actual script run) before
   Claude Code acts on them.
 - Neither tool's assertions override direct, observable output.

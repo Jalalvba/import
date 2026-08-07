@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-test_gdrive_download.py
-------------------------
+scripts/gdrive_download_check.py
+----------------------------------
 Optional, standalone manual debugging tool — not part of the automated
-run.py flow, and not called by anything else in the repo. Confirms
-get_latest_expected_files() downloads correct, valid-looking byte content
-for the expected pipeline input files — dedupe-by-latest-modifiedTime
-included. Useful when diagnosing a pipeline failure: run this to check
-"did we actually fetch valid Excel bytes from Drive" before suspecting
-the transform/Mongo logic in ds.py/cp.py/parc.py/bc.py.
+run.py flow, not called by anything else in the repo, and NOT a pytest
+test despite its old test_*.py name/location (moved into scripts/ so
+pytest doesn't try to collect and execute it, which would trigger a live
+Drive download). Confirms get_latest_expected_files() downloads correct,
+valid-looking byte content for the expected pipeline input files --
+dedupe-by-latest-modifiedTime included. Useful when diagnosing a pipeline
+failure: run this to check "did we actually fetch valid Excel bytes from
+Drive" before suspecting the transform/Mongo logic in
+ds.py/cp.py/parc.py/bc.py.
 
 Usage:
-    python3 test_gdrive_download.py
+    python3 scripts/gdrive_download_check.py
 """
 
 import os
@@ -20,10 +23,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 from lib.gdrive import get_latest_expected_files
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+load_dotenv(dotenv_path=ROOT / ".env")
 
 folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 if not folder_id:
