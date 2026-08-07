@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from pymongo.errors import PyMongoError
 
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
-from lib.validate import validate_columns
+from lib.validate import validate_columns, validate_non_empty
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
 
@@ -97,7 +97,8 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
     logger.log("column_validation", "started")
     validate_columns(df, needed_stripped)
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present")
+    validate_non_empty(df, "WW")
+    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present, 'WW' not empty")
 
     df = df[needed_stripped].copy()
     rows_in = len(df)
