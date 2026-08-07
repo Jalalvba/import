@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from pymongo.errors import PyMongoError
 
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
-from lib.validate import validate_columns
+from lib.validate import validate_any_non_empty, validate_columns
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
 
@@ -71,7 +71,12 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
     logger.log("column_validation", "started")
     validate_columns(df, needed_stripped)
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present")
+    validate_any_non_empty(df, ["Immatriculation", "Numéro WW"])
+    logger.log(
+        "column_validation", "success",
+        f"all {len(needed_stripped)} required columns present, "
+        f"'Immatriculation'/'Numéro WW' not both empty",
+    )
 
     df = df[needed_stripped].copy()
     rows_in = len(df)
@@ -101,11 +106,14 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     return df
 
 
-def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> None:
+def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> bool:
+    """Returns True if records were actually pushed, False if the run was
+    skipped for having zero records -- callers must not treat a False
+    return as a success (see main())."""
     records = df_to_mongo_records(df, DATE_COLUMNS)
     if not records:
         logger.log("mongo_push", "skipped", "no records to push")
-        return
+        return False
 
     logger.log("mongo_connect", "started")
     db = get_mongo_db()
@@ -131,17 +139,24 @@ def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> None:
     )
 
     db.client.close()
+    return True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(file_bytes: bytes, logger: PipelineLogger | None = None):
+def main(file_bytes: bytes, logger: PipelineLogger | None = None) -> str:
+    """Returns the run's finish status: "success" (pushed), "skipped"
+    (zero usable records -- pipeline_state must NOT be updated for this,
+    so the next trigger genuinely retries instead of trusting a false
+    "already processed" state), or raises on failure."""
     if logger is None:
         logger = PipelineLogger(PIPELINE_NAME)
 
     try:
         df = extract_transform(file_bytes, logger)
-        push_to_mongo(df, logger)
-        logger.finish("success")
+        pushed = push_to_mongo(df, logger)
+        status = "success" if pushed else "skipped"
+        logger.finish(status)
+        return status
     except BaseException as e:
         logger.log("pipeline_error", "failed", str(e))
         logger.finish("failed")
@@ -149,8 +164,8 @@ def main(file_bytes: bytes, logger: PipelineLogger | None = None):
 
 
 if __name__ == "__main__":
-    from lib.gdrive import download_file_bytes, find_file_metadata
-    from lib.pipeline_state import force_requested, resolve_pipeline_run, update_state
+    from lib.gdrive import download_file_bytes, find_file_metadata, verify_download_size
+    from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
@@ -174,17 +189,27 @@ if __name__ == "__main__":
     run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
 
     decision = resolve_pipeline_run(PIPELINE_NAME, file_meta, run_logger, force=force_requested())
-    if decision == "skip_unchanged":
+    if decision in ("skip_unchanged", "already_running"):
         sys.exit(0)
     if decision == "hard_fail":
         sys.exit(1)
 
-    fetched_bytes = download_file_bytes(file_meta["id"])
-    run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
-
     try:
-        main(fetched_bytes, logger=run_logger)
-    except BaseException:
-        raise
-    else:
-        update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+        fetched_bytes = download_file_bytes(file_meta["id"])
+        try:
+            verify_download_size(fetched_bytes, file_meta)
+        except ValueError as e:
+            run_logger.log("file_download", "failed", str(e))
+            run_logger.finish("failed")
+            raise
+        run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
+
+        try:
+            status = main(fetched_bytes, logger=run_logger)
+        except BaseException:
+            raise
+        else:
+            if status == "success":
+                update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+    finally:
+        release_lock(PIPELINE_NAME, run_logger.run_id)

@@ -5,11 +5,13 @@ cp.py
 End-to-end CP (contract particulars) pipeline: reads
 ConditionParticulieres.xls fetched from the Google Drive folder
 (GOOGLE_DRIVE_FOLDER_ID in .env), extracts needed columns, cleans and
-normalizes all fields, deduplicates by IMM keeping the row with the
-latest Date fin contrat, then pushes a full atomic reload directly to
-the `cp` MongoDB collection -- no CSV intermediate. Every run's full
-step-by-step breakdown is persisted as one document in the
-`pipeline_runs` collection (see lib/pipeline_log.py).
+normalizes all fields, deduplicates by WW keeping ONE whole representative
+row per WW (real IMM preferred over a WW-style placeholder, then latest
+Date fin contrat as a tiebreak) -- every kept field comes from that same
+row, never mixed across rows in the group -- then pushes a full atomic
+reload directly to the `cp` MongoDB collection -- no CSV intermediate.
+Every run's full step-by-step breakdown is persisted as one document in
+the `pipeline_runs` collection (see lib/pipeline_log.py).
 
 Usage:
     python cp.py
@@ -30,7 +32,7 @@ from dotenv import load_dotenv
 from pymongo.errors import PyMongoError
 
 from lib.transform import CP_PARC_FORMATS, clean_val, format_date
-from lib.validate import validate_columns
+from lib.validate import validate_columns, validate_non_empty
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
 
@@ -97,7 +99,8 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
     logger.log("column_validation", "started")
     validate_columns(df, needed_stripped)
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present")
+    validate_non_empty(df, "WW")
+    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present, 'WW' not empty")
 
     df = df[needed_stripped].copy()
     rows_in = len(df)
@@ -120,23 +123,26 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     # Drop rows where WW is empty
     df = df[~df["_ww_key"].isin(["", "nan"])]
 
-    # For each WW group: get the latest Date fin contrat
-    latest_date = (
-        df.groupby("_ww_key")["Date fin contrat"]
-        .apply(lambda s: s.iloc[s.apply(parse_date_for_sort).argmax()])
-        .reset_index()
-        .rename(columns={"Date fin contrat": "_latest_fin"})
+    # Pick ONE representative row per WW: real IMM first, then latest
+    # Date fin contrat as a tiebreak -- and keep ALL of that row's fields
+    # together (start date, end date, vehicle type, ...), never hoisting a
+    # field from a different row in the same WW group. Mixing an end date
+    # from one row with the start date/vehicle details of another produced
+    # "chimera" records describing a contract that occurred in no single
+    # source row. "NUM chassis" is a final tiebreak so the pick is
+    # deterministic independent of source row order -- without it, a tie on
+    # both real-IMM and end date (e.g. two rows neither with a real IMM,
+    # same end date) fell back on pandas' stable sort preserving whatever
+    # order Excel happened to export rows in, which isn't guaranteed to
+    # stay consistent across re-exports of the same underlying data.
+    df["_chassis_key"] = df["NUM chassis"].apply(lambda x: str(x).strip())
+    df = df.sort_values(
+        ["_ww_key", "_real_imm", "_sort_date", "_chassis_key"],
+        ascending=[True, False, False, True],
     )
-
-    # Pick the best representative row per WW: real IMM first, then latest date
-    df = df.sort_values(["_ww_key", "_real_imm", "_sort_date"], ascending=[True, False, False])
     df = df.drop_duplicates(subset=["_ww_key"], keep="first")
 
-    # Merge latest Date fin contrat back in
-    df = df.merge(latest_date, on="_ww_key", how="left")
-    df["Date fin contrat"] = df["_latest_fin"]
-
-    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key", "_latest_fin"])
+    df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key", "_chassis_key"])
 
     for col in [c.strip() for c in DATE_COLUMNS]:
         if col in df.columns:
@@ -156,11 +162,14 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     return df
 
 
-def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> None:
+def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> bool:
+    """Returns True if records were actually pushed, False if the run was
+    skipped for having zero records -- callers must not treat a False
+    return as a success (see main())."""
     records = df_to_mongo_records(df, DATE_COLUMNS)
     if not records:
         logger.log("mongo_push", "skipped", "no records to push")
-        return
+        return False
 
     logger.log("mongo_connect", "started")
     db = get_mongo_db()
@@ -186,17 +195,24 @@ def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> None:
     )
 
     db.client.close()
+    return True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(file_bytes: bytes, logger: PipelineLogger | None = None):
+def main(file_bytes: bytes, logger: PipelineLogger | None = None) -> str:
+    """Returns the run's finish status: "success" (pushed), "skipped"
+    (zero usable records -- pipeline_state must NOT be updated for this,
+    so the next trigger genuinely retries instead of trusting a false
+    "already processed" state), or raises on failure."""
     if logger is None:
         logger = PipelineLogger(PIPELINE_NAME)
 
     try:
         df = extract_transform(file_bytes, logger)
-        push_to_mongo(df, logger)
-        logger.finish("success")
+        pushed = push_to_mongo(df, logger)
+        status = "success" if pushed else "skipped"
+        logger.finish(status)
+        return status
     except BaseException as e:
         logger.log("pipeline_error", "failed", str(e))
         logger.finish("failed")
@@ -204,8 +220,8 @@ def main(file_bytes: bytes, logger: PipelineLogger | None = None):
 
 
 if __name__ == "__main__":
-    from lib.gdrive import download_file_bytes, find_file_metadata
-    from lib.pipeline_state import force_requested, resolve_pipeline_run, update_state
+    from lib.gdrive import download_file_bytes, find_file_metadata, verify_download_size
+    from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
@@ -229,17 +245,27 @@ if __name__ == "__main__":
     run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
 
     decision = resolve_pipeline_run(PIPELINE_NAME, file_meta, run_logger, force=force_requested())
-    if decision == "skip_unchanged":
+    if decision in ("skip_unchanged", "already_running"):
         sys.exit(0)
     if decision == "hard_fail":
         sys.exit(1)
 
-    fetched_bytes = download_file_bytes(file_meta["id"])
-    run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
-
     try:
-        main(fetched_bytes, logger=run_logger)
-    except BaseException:
-        raise
-    else:
-        update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+        fetched_bytes = download_file_bytes(file_meta["id"])
+        try:
+            verify_download_size(fetched_bytes, file_meta)
+        except ValueError as e:
+            run_logger.log("file_download", "failed", str(e))
+            run_logger.finish("failed")
+            raise
+        run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
+
+        try:
+            status = main(fetched_bytes, logger=run_logger)
+        except BaseException:
+            raise
+        else:
+            if status == "success":
+                update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+    finally:
+        release_lock(PIPELINE_NAME, run_logger.run_id)

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-test_gdrive_auth.py
---------------------
+scripts/gdrive_auth_check.py
+-----------------------------
 Optional, standalone manual debugging tool — not part of the automated
-run.py flow, and not called by anything else in the repo. Confirms
-GOOGLE_SERVICE_ACCOUNT_KEY_B64 / GOOGLE_DRIVE_FOLDER_ID are set up
-correctly by listing the target Drive folder's contents. Useful when
-diagnosing a pipeline failure: run this first to isolate "Drive access is
-broken" from "pipeline transform logic is broken."
+run.py flow, not called by anything else in the repo, and NOT a pytest
+test despite its old test_*.py name/location (moved into scripts/ so
+pytest doesn't try to collect and execute it, which would trigger a live
+Drive API call). Confirms GOOGLE_SERVICE_ACCOUNT_KEY_B64 /
+GOOGLE_DRIVE_FOLDER_ID are set up correctly by listing the target Drive
+folder's contents. Useful when diagnosing a pipeline failure: run this
+first to isolate "Drive access is broken" from "pipeline transform logic
+is broken."
 
 Usage:
-    python3 test_gdrive_auth.py
+    python3 scripts/gdrive_auth_check.py
 """
 
 import os
@@ -19,10 +22,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 from lib.gdrive import list_drive_files
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+load_dotenv(dotenv_path=ROOT / ".env")
 
 folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 if not folder_id:

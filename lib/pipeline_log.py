@@ -19,10 +19,23 @@ and Mongo is never more than one step behind the console.
 """
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
 from lib.mongo import get_mongo_db
+
+# /api/status serves a run's step detail text unauthenticated. pymongo
+# scrubs credentials from its own exception messages today, so no
+# connection string has actually leaked through this path -- but this is
+# cheap insurance against a future exception type (or a future pymongo
+# version) that doesn't. Matches mongodb:// and mongodb+srv:// URIs
+# anywhere in a string and redacts everything after the scheme.
+_CONNECTION_STRING_RE = re.compile(r"mongodb(\+srv)?://\S+", re.IGNORECASE)
+
+
+def _sanitize(detail: str) -> str:
+    return _CONNECTION_STRING_RE.sub("mongodb://[REDACTED]", detail)
 
 _STATUS_MARKERS = {
     "started": "▶",
@@ -33,6 +46,15 @@ _STATUS_MARKERS = {
 }
 
 _COLLECTION = "pipeline_runs"
+
+# /api/status is unauthenticated and does a point lookup by run_id on
+# every call -- without an index that's a full collection scan, and the
+# collection grows 4 documents per trigger forever. A unique index on
+# run_id fixes the scan; a TTL index on started_at auto-prunes documents
+# older than 90 days so the collection doesn't grow unbounded.
+_RUN_ID_INDEX = "run_id"
+_TTL_FIELD = "started_at"
+_TTL_SECONDS = 90 * 24 * 3600
 
 
 def _triggered_from() -> str:
@@ -66,7 +88,16 @@ class PipelineLogger:
             self._db = get_mongo_db()
         return self._db[_COLLECTION]
 
+    @staticmethod
+    def _ensure_indexes(col) -> None:
+        # Idempotent -- a no-op once these already exist. Created lazily
+        # here (on first write) rather than at import time, since that
+        # would require a Mongo connection just to import this module.
+        col.create_index(_RUN_ID_INDEX, unique=True)
+        col.create_index(_TTL_FIELD, expireAfterSeconds=_TTL_SECONDS)
+
     def log(self, step: str, status: str, detail: str = "") -> None:
+        detail = _sanitize(detail)
         entry = {
             "step": step,
             "timestamp": datetime.now(timezone.utc),
@@ -84,6 +115,7 @@ class PipelineLogger:
         try:
             col = self._collection()
             if not self._inserted:
+                self._ensure_indexes(col)
                 col.insert_one({
                     "run_id": self.run_id,
                     "pipeline": self.pipeline,
@@ -112,6 +144,7 @@ class PipelineLogger:
                 # calls shouldn't normally happen (every code path logs at
                 # least one step, even on an immediate failure), but insert
                 # the full document rather than silently losing the run.
+                self._ensure_indexes(col)
                 col.insert_one(self.to_document())
                 self._inserted = True
             else:
@@ -144,8 +177,8 @@ class PipelineLogger:
 
 def get_run_status(run_id: str) -> dict | None:
     """Read-only lookup of a run's current pipeline_runs document by
-    run_id -- used by api/status.py to poll a run's live progress.
-    Returns None if no such run_id exists (yet, or ever)."""
+    run_id -- used by api/index.py's /api/status route to poll a run's
+    live progress. Returns None if no such run_id exists (yet, or ever)."""
     db = get_mongo_db()
     try:
         return db[_COLLECTION].find_one({"run_id": run_id})

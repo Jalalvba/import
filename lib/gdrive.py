@@ -31,6 +31,8 @@ EXPECTED_FILENAMES = {
 }
 REQUIRED_FILENAMES = EXPECTED_FILENAMES - {"YBONTEC.xlsx"}
 
+_service_cache = None
+
 
 def _load_service_account_credentials(env_path: Path | None = None) -> Credentials:
     """Load GOOGLE_SERVICE_ACCOUNT_KEY_B64 from .env, decode + parse it, and
@@ -73,6 +75,21 @@ def _load_service_account_credentials(env_path: Path | None = None) -> Credentia
         ) from e
 
 
+def _get_drive_service():
+    """Build (and cache, module-level) the authenticated Drive service
+    client. list_drive_files() and download_file_bytes() previously each
+    called _load_service_account_credentials() + build() independently --
+    2 full auth handshakes per pipeline instead of reusing one client
+    across a run. Cached here so a run.py invocation that calls both
+    functions repeatedly across all four pipelines authenticates once for
+    the whole process, not once per call."""
+    global _service_cache
+    if _service_cache is None:
+        creds = _load_service_account_credentials()
+        _service_cache = build("drive", "v3", credentials=creds)
+    return _service_cache
+
+
 def list_drive_files(folder_id: str) -> list[dict]:
     """Return [{id, name, mimeType, modifiedTime, size}, ...] for every
     non-trashed file directly inside folder_id, using Drive API v3,
@@ -82,8 +99,7 @@ def list_drive_files(folder_id: str) -> list[dict]:
     if not folder_id:
         raise ValueError("❌ folder_id is required (pass GOOGLE_DRIVE_FOLDER_ID).")
 
-    creds = _load_service_account_credentials()
-    service = build("drive", "v3", credentials=creds)
+    service = _get_drive_service()
 
     files = []
     page_token = None
@@ -108,8 +124,7 @@ def list_drive_files(folder_id: str) -> list[dict]:
 def download_file_bytes(file_id: str) -> bytes:
     """Download a Drive file's raw content via files().get_media(), fully
     in memory — no temp files, no disk writes."""
-    creds = _load_service_account_credentials()
-    service = build("drive", "v3", credentials=creds)
+    service = _get_drive_service()
 
     request = service.files().get_media(fileId=file_id)
     buffer = io.BytesIO()
@@ -119,6 +134,28 @@ def download_file_bytes(file_id: str) -> bytes:
         _, done = downloader.next_chunk()
 
     return buffer.getvalue()
+
+
+def verify_download_size(file_bytes: bytes, file_meta: dict) -> None:
+    """Raise ValueError if file_bytes' length doesn't match Drive's own
+    reported `size` for this file (already fetched in file_meta, otherwise
+    unused). A short read that Drive terminates as a clean 200 could
+    otherwise yield a truncated file that calamine/openpyxl silently parses
+    as fewer rows rather than erroring -- shipping partial data. A no-op if
+    Drive didn't report a size at all (native Google Docs types omit it;
+    never true for the .xlsx/.xls files this project downloads, but
+    tolerated rather than treated as a mismatch)."""
+    expected = file_meta.get("size")
+    if not expected:
+        return
+    actual = len(file_bytes)
+    expected = int(expected)
+    if actual != expected:
+        raise ValueError(
+            f"❌ downloaded {actual:,} bytes for '{file_meta.get('name', file_meta.get('id'))}' "
+            f"but Drive reported {expected:,} bytes -- likely a truncated/short download, not a "
+            f"safe file to process"
+        )
 
 
 def _latest_by_name(files: list[dict], names: set[str]) -> dict[str, dict]:

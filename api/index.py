@@ -46,9 +46,12 @@ source file:
 
 The trigger response's `results[].status` is one of "success" / "failed"
 / "skipped_absent" (file not in the Drive folder at all) /
-"skipped_unchanged" (unchanged since the last successful run) -- a
-top-level `summary` dict tallies counts per status so a caller doesn't
-have to scan `results` to tell a real run from a no-op one.
+"skipped_unchanged" (unchanged since the last successful run, or another
+run for this pipeline currently holds the lock) / "skipped_empty" (the
+source file parsed to zero usable records -- pipeline_state is
+deliberately not updated for this outcome, so the next trigger retries)
+-- a top-level `summary` dict tallies counts per status so a caller
+doesn't have to scan `results` to tell a real run from a no-op one.
 
 The trigger route is still a single, synchronous Vercel invocation --
 one request in, one JSON response out only once every pipeline has
@@ -103,6 +106,7 @@ from dotenv import load_dotenv
 import run as pipeline_run
 from lib.gdrive import list_expected_files
 from lib.pipeline_log import get_run_status
+from lib.pipeline_state import check_trigger_rate_limit
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -176,6 +180,13 @@ class handler(BaseHTTPRequestHandler):
             self._respond(401, {"success": False, "error": "unauthorized"})
             return
 
+        # Server-side rate limit -- the front-end proxy's 3-per-15-min
+        # limiter is bypassable by a direct curl against this endpoint,
+        # so enforce the same limit here too, before touching Drive/Mongo.
+        if not check_trigger_rate_limit():
+            self._respond(429, {"success": False, "error": "rate limit exceeded, try again shortly"})
+            return
+
         log_buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
@@ -189,7 +200,7 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        summary = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "failed": 0}
+        summary = {"success": 0, "skipped_unchanged": 0, "skipped_absent": 0, "skipped_empty": 0, "failed": 0}
         for r in results:
             summary[r["status"]] += 1
 
