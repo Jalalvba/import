@@ -5,6 +5,7 @@ Shared MongoDB I/O for the avis ETL pipelines.
 """
 
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,8 +70,16 @@ def atomic_reload(db, collection_name: str, records: list[dict], index_specs) ->
     atomically rename staging → collection_name (dropTarget=True). The live
     collection is never dropped before the replacement data is fully
     written and verified. On any failure the staging collection is dropped
-    and the live collection is left untouched."""
-    staging_name = f"{collection_name}_staging"
+    and the live collection is left untouched.
+
+    The staging collection name is unique per call (uuid4 suffix), not a
+    fixed f"{collection_name}_staging" -- two overlapping runs against the
+    same collection (e.g. a manual trigger + a concurrent Vercel trigger)
+    each get their own staging collection and can't stomp on each other's
+    in-progress staged data. See lib/pipeline_state.py's run lock for the
+    complementary guard against overlapping runs actually racing to the
+    final rename."""
+    staging_name = f"{collection_name}_staging_{uuid.uuid4().hex[:8]}"
     db[staging_name].drop()
     try:
         if records:

@@ -103,6 +103,7 @@ from dotenv import load_dotenv
 import run as pipeline_run
 from lib.gdrive import list_expected_files
 from lib.pipeline_log import get_run_status
+from lib.pipeline_state import check_trigger_rate_limit
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -174,6 +175,13 @@ class handler(BaseHTTPRequestHandler):
         # at all if the token is missing or wrong.
         if not expected_token or not token or not hmac.compare_digest(token, expected_token):
             self._respond(401, {"success": False, "error": "unauthorized"})
+            return
+
+        # Server-side rate limit -- the front-end proxy's 3-per-15-min
+        # limiter is bypassable by a direct curl against this endpoint,
+        # so enforce the same limit here too, before touching Drive/Mongo.
+        if not check_trigger_rate_limit():
+            self._respond(429, {"success": False, "error": "rate limit exceeded, try again shortly"})
             return
 
         log_buffer = io.StringIO()

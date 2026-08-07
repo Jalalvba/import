@@ -18,13 +18,24 @@ detail — this file states the rule, not the case for it.
    ever written directly into a `.py` file, a commit, or a doc.
 
 2. **`cp.py`/`parc.py` do a full reload of their collection via
-   `lib/mongo.py`'s `atomic_reload()`** — a staged insert into
-   `<collection>_staging`, a verified row count, then an atomic
+   `lib/mongo.py`'s `atomic_reload()`** — a staged insert into a
+   per-call, uuid4-suffixed staging collection (`<collection>_staging_<8
+   hex chars>`, not a fixed name), a verified row count, then an atomic
    `rename(dropTarget=True)` swap. The live collection is never dropped
    before the replacement data is fully written and verified, so a failed
-   insert leaves the original collection untouched rather than empty.
-   That said: never run either of these without a current fetch of the
-   Drive input file — a stale or partial in-memory transform faithfully
+   insert leaves the original collection untouched rather than empty. The
+   staging name being unique per call (not a fixed `<collection>_staging`)
+   is deliberate, not incidental — two overlapping runs against the same
+   collection used to be able to stomp on each other's in-progress staged
+   data via that fixed name; each call now gets its own. Overlapping runs
+   are additionally prevented altogether by the run lock in
+   `lib/pipeline_state.py` (`acquire_lock()`/`release_lock()`, backed by a
+   unique index on `pipeline_state.pipeline` and a `LOCK_LEASE_SECONDS`
+   lease so a crashed run can't deadlock future ones) — `resolve_pipeline_run()`
+   acquires it before returning `"proceed"`, and every caller (`run.py`,
+   each script's `__main__`) releases it in a `finally` block regardless of
+   outcome. That said: never run either of these without a current fetch of
+   the Drive input file — a stale or partial in-memory transform faithfully
    replaces the entire collection with stale or partial data. Always
    check the printed before/after record counts before treating the run
    as successful.

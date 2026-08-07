@@ -171,7 +171,7 @@ def main(file_bytes: bytes, year: int | None = None, logger: PipelineLogger | No
 
 if __name__ == "__main__":
     from lib.gdrive import download_file_bytes, find_file_metadata
-    from lib.pipeline_state import force_requested, resolve_pipeline_run, update_state
+    from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
@@ -197,17 +197,20 @@ if __name__ == "__main__":
     run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
 
     decision = resolve_pipeline_run(PIPELINE_NAME, file_meta, run_logger, force=force_requested())
-    if decision == "skip_unchanged":
+    if decision in ("skip_unchanged", "already_running"):
         sys.exit(0)
     if decision == "hard_fail":
         sys.exit(1)
 
-    fetched_bytes = download_file_bytes(file_meta["id"])
-    run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
-
     try:
-        main(fetched_bytes, arg_year, logger=run_logger)
-    except BaseException:
-        raise
-    else:
-        update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+        fetched_bytes = download_file_bytes(file_meta["id"])
+        run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
+
+        try:
+            main(fetched_bytes, arg_year, logger=run_logger)
+        except BaseException:
+            raise
+        else:
+            update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
+    finally:
+        release_lock(PIPELINE_NAME, run_logger.run_id)

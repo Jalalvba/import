@@ -43,7 +43,7 @@ import ds
 import parc
 from lib.gdrive import download_file_bytes, list_expected_files
 from lib.pipeline_log import PipelineLogger
-from lib.pipeline_state import force_requested, resolve_pipeline_run, update_state
+from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
 
 # ── Pipeline map: Drive filename → single-file pipeline module ───────────────
 PIPELINES = [
@@ -125,22 +125,27 @@ def run_all(file_metadata: dict[str, dict], force: bool = False) -> list[dict]:
         logger.log("drive_listing", "success", f"found {len(file_metadata)} of {len(PIPELINES)} expected file(s) in Drive folder")
 
         decision = resolve_pipeline_run(pipeline_name, meta, logger, force=force)
-        if decision in ("skip_unchanged", "hard_fail"):
+        if decision in ("skip_unchanged", "hard_fail", "already_running"):
             results.append({
                 "label":    p["label"],
                 "filename": p["filename"],
-                "status":   "skipped_unchanged" if decision == "skip_unchanged" else "failed",
+                "status":   "skipped_unchanged" if decision in ("skip_unchanged", "already_running") else "failed",
                 "run_id":   logger.run_id,
                 "steps":    [f"{s['step']}:{s['status']}" for s in logger.steps],
             })
             continue
 
-        file_bytes = download_file_bytes(meta["id"])
-        logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
+        try:
+            file_bytes = download_file_bytes(meta["id"])
+            logger.log("file_download", "success", f"{p['filename']}: {len(file_bytes):,} bytes")
 
-        ok = run_pipeline(p, file_bytes, logger)
-        if ok:
-            update_state(pipeline_name, p["filename"], meta["id"], meta["modifiedTime"], logger.run_id)
+            ok = run_pipeline(p, file_bytes, logger)
+            if ok:
+                update_state(pipeline_name, p["filename"], meta["id"], meta["modifiedTime"], logger.run_id)
+        finally:
+            # Always release the lock resolve_pipeline_run acquired above,
+            # success or failure, so a crash here can't deadlock the next run.
+            release_lock(pipeline_name, logger.run_id)
         results.append({
             "label":    p["label"],
             "filename": p["filename"],
