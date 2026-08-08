@@ -29,6 +29,7 @@ from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_any_non_empty, validate_columns
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
+from lib.field_mapping import apply_field_mapping
 
 COLLECTION = "parc"
 FILENAME   = "Fullparcs.xls"
@@ -37,24 +38,24 @@ PIPELINE_NAME = "parc"
 HEADER_ROW = 7  # row 8 → 0-indexed = 7
 
 COLUMNS_NEEDED = [
-    "Client",
-    "Marque",
-    "Modèle",
-    "Immatriculation",
-    "Numéro WW",
-    "N° de chassis",
-    "Etat véhicule",
-    "Date MCE",
-    "Type location",
-    "Locataire",
+    "client",
+    "marque",
+    "modele",
+    "immatriculation",
+    "numero_ww",
+    "n_de_chassis",
+    "etat_vehicule",
+    "date_mce",
+    "type_location",
+    "locataire",
 ]
 
-DATE_COLUMNS = ["Date MCE"]
+DATE_COLUMNS = ["date_mce"]
 
 INDEX_SPECS = [
-    ([("Immatriculation", 1)], "immatriculation"),
-    ([("Numéro WW", 1)], "numero_ww"),
-    ([("N° de chassis", 1)], "n_de_chassis"),
+    ([("immatriculation", 1)], "immatriculation"),
+    ([("numero_ww", 1)], "numero_ww"),
+    ([("n_de_chassis", 1)], "n_de_chassis"),
 ]
 
 
@@ -65,42 +66,42 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
 
     logger.log("excel_parse", "started", f"parsing {FILENAME}")
     df = pd.read_excel(io.BytesIO(file_bytes), engine="calamine", header=HEADER_ROW)
-    df.columns = [c.strip() for c in df.columns]
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
-    needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
+    df = apply_field_mapping(df, COLLECTION)
+
     logger.log("column_validation", "started")
-    validate_columns(df, needed_stripped)
-    validate_any_non_empty(df, ["Immatriculation", "Numéro WW"])
+    validate_columns(df, COLUMNS_NEEDED)
+    validate_any_non_empty(df, ["immatriculation", "numero_ww"])
     logger.log(
         "column_validation", "success",
-        f"all {len(needed_stripped)} required columns present, "
-        f"'Immatriculation'/'Numéro WW' not both empty",
+        f"all {len(COLUMNS_NEEDED)} required columns present, "
+        f"'immatriculation'/'numero_ww' not both empty",
     )
 
-    df = df[needed_stripped].copy()
+    df = df[COLUMNS_NEEDED].copy()
     rows_in = len(df)
 
     logger.log("transform_filter", "started")
 
-    for col in [c.strip() for c in DATE_COLUMNS]:
+    for col in DATE_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(lambda v: format_date(v, CP_PARC_FORMATS))
 
     for col in df.columns:
-        if col not in [c.strip() for c in DATE_COLUMNS]:
+        if col not in DATE_COLUMNS:
             df[col] = df[col].apply(clean_val)
 
-    # Drop rows where Immatriculation and Numéro WW are both empty
+    # Drop rows where immatriculation and numero_ww are both empty
     df = df[
-        df["Immatriculation"].notna() & (df["Immatriculation"].str.strip() != "") |
-        df["Numéro WW"].notna() & (df["Numéro WW"].str.strip() != "")
+        df["immatriculation"].notna() & (df["immatriculation"].str.strip() != "") |
+        df["numero_ww"].notna() & (df["numero_ww"].str.strip() != "")
     ]
     rows_out = len(df)
     logger.log(
         "transform_filter", "success",
         f"{rows_in} rows in, {rows_out} rows out, {rows_in - rows_out} dropped "
-        f"(missing both Immatriculation and Numéro WW)",
+        f"(missing both immatriculation and numero_ww)",
     )
 
     return df

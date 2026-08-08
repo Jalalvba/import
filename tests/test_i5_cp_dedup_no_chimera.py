@@ -40,10 +40,10 @@ def test_dedup_keeps_representative_rows_own_end_date_not_a_later_row():
 
     assert len(out) == 1
     row = out.iloc[0]
-    assert row["IMM"] == "AB-123-CD", "real IMM should still win the representative-row pick"
-    assert row["Date début contrat"] == "2024-01-01T00:00:00.000Z", "start date must come from the SAME row as IMM"
-    assert row["Date fin contrat"] == "2025-06-01T00:00:00.000Z", (
+    assert row["imm"] == "AB-123-CD", "real IMM should still win the representative-row pick"
+    assert row["date_debut_contrat"] == "2024-01-01T00:00:00.000Z", "start date must come from the SAME row as IMM"
+    assert row["date_fin_contrat"] == "2025-06-01T00:00:00.000Z", (
         "end date must be the representative row's OWN end date, not hoisted from a "
         "different row in the WW group"
     )
-    assert row["Modèle"] == "Clio", "vehicle details must come from the same representative row too"
+    assert row["modele"] == "Clio", "vehicle details must come from the same representative row too"

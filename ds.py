@@ -32,31 +32,45 @@ from dotenv import load_dotenv
 
 from pymongo.errors import PyMongoError
 
-from lib.transform import BC_DS_FORMATS, clean_val, format_date
+from lib.transform import BC_DS_FORMATS, clean_numeric, clean_val, format_date
 from lib.validate import validate_columns, validate_non_empty
-from lib.mongo import df_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
+from lib.mongo import df_to_mongo_records, date_scoped_reload, ensure_indexes, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
+from lib.field_mapping import apply_field_mapping
 
 COLLECTION = "ds"
 FILENAME   = "YFACSCALDS.xlsx"
 PIPELINE_NAME = "ds"
 
-COLUMNS_NEEDED = [
-    "Date DS",
-    "N°DS",
-    "Code art",
-    "Désignation Consomation ",
-    "Qté",
-    "Immatriculation",
-    "KM",
-    "CMD Num",
-    "Founisseur",
-    "ENTITE",
-    "Description",
-    "Technicein",
+# "immatriculation_date_ds" already exists on the live collection --
+# only these two are missing.
+INDEX_SPECS = [
+    ([("cmd_num", 1)], "cmd_num"),
+    ([("technicien", 1)], "technicien"),
 ]
 
-DATE_COLUMNS = ["Date DS"]
+COLUMNS_NEEDED = [
+    "date_ds",
+    "n_ds",
+    "code_art",
+    "designation_consommation",
+    "qte",
+    "immatriculation",
+    "km",
+    "cmd_num",
+    "fournisseur",
+    "entite_nom",
+    "description",
+    "technicien",
+]
+
+DATE_COLUMNS = ["date_ds"]
+# km/qte are stored as native BSON numbers, not strings -- see
+# lib.transform.clean_numeric(). jalal's own aggregation code already
+# tolerates either representation defensively ($toString/$convert), so
+# this is a safe cutover; see the field-mapping deploy plan for the
+# Phase 2 audit that confirmed it.
+NUMERIC_COLUMNS = ["km", "qte"]
 
 
 # ── Excel → Mongo records ──────────────────────────────────────────────────────
@@ -66,30 +80,45 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
 
     logger.log("excel_parse", "started", f"parsing {FILENAME}")
     df = pd.read_excel(io.BytesIO(file_bytes), header=1)
-    df.columns = [c.strip() for c in df.columns]
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
-    needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
-    logger.log("column_validation", "started")
-    validate_columns(df, needed_stripped)
-    key = "N°DS"
-    validate_non_empty(df, key)
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present, '{key}' not empty")
+    df = apply_field_mapping(df, COLLECTION)
 
-    df = df[needed_stripped].copy()
+    logger.log("column_validation", "started")
+    validate_columns(df, COLUMNS_NEEDED)
+    key = "n_ds"
+    validate_non_empty(df, key)
+    logger.log("column_validation", "success", f"all {len(COLUMNS_NEEDED)} required columns present, '{key}' not empty")
+
+    df = df[COLUMNS_NEEDED].copy()
     rows_in = len(df)
 
     logger.log("transform_filter", "started")
 
-    for col in [c.strip() for c in DATE_COLUMNS]:
+    for col in DATE_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(lambda v: format_date(v, BC_DS_FORMATS))
 
+    raw_numeric = {col: df[col].copy() for col in NUMERIC_COLUMNS if col in df.columns}
+    for col in NUMERIC_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_numeric)
+
     for col in df.columns:
-        if col not in [c.strip() for c in DATE_COLUMNS]:
+        if col not in DATE_COLUMNS and col not in NUMERIC_COLUMNS:
             df[col] = df[col].apply(clean_val)
 
-    key = "N°DS"
+    for col, raw in raw_numeric.items():
+        blank = raw.apply(lambda v: v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "")
+        malformed = df[col].isna() & ~blank
+        if malformed.any():
+            samples = raw[malformed].astype(str).head(5).tolist()
+            logger.log(
+                "transform_filter", "warning",
+                f"{int(malformed.sum())} malformed '{col}' value(s) set to null, e.g. {samples}",
+            )
+
+    key = "n_ds"
     df = df[df[key].notna() & (df[key].str.strip() != "")]
     rows_out = len(df)
     logger.log(
@@ -101,13 +130,13 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
 
 
 def extract_mongo_records(df: pd.DataFrame, year: int) -> tuple[list[dict], object]:
-    records = df_to_mongo_records(df, DATE_COLUMNS)
-    year_records = [r for r in records if r.get("Date DS") is not None and r["Date DS"].year == year]
+    records = df_to_mongo_records(df, DATE_COLUMNS, NUMERIC_COLUMNS)
+    year_records = [r for r in records if r.get("date_ds") is not None and r["date_ds"].year == year]
 
     if not year_records:
         return [], None
 
-    earliest_date = min(r["Date DS"] for r in year_records)
+    earliest_date = min(r["date_ds"] for r in year_records)
     return year_records, earliest_date
 
 
@@ -128,7 +157,7 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
 
     logger.log("mongo_push", "started", f"{len(records)} records, earliest={earliest_date.date()}")
     try:
-        date_scoped_reload(db, COLLECTION, records, "Date DS", earliest_date, year)
+        date_scoped_reload(db, COLLECTION, records, "date_ds", earliest_date, year)
     except (PyMongoError, RuntimeError) as e:
         logger.log("mongo_push", "failed", f"'{COLLECTION}' window [{earliest_date.date()}, {year}] left untouched: {e}")
         db.client.close()
@@ -140,6 +169,10 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
         "mongo_push", "success",
         f"before={before_count} after={after_count} diff={after_count - before_count}",
     )
+
+    logger.log("index_ensure", "started", f"{len(INDEX_SPECS)} index(es) on '{COLLECTION}'")
+    ensure_indexes(db, COLLECTION, INDEX_SPECS)
+    logger.log("index_ensure", "success")
 
     db.client.close()
     return True

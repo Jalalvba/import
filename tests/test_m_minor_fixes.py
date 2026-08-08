@@ -35,14 +35,14 @@ def test_cp_dedup_tiebreak_is_deterministic_via_chassis():
     logger = PipelineLogger("cp")
     with patch("cp.pd.read_excel", return_value=df):
         out = cp.extract_transform(b"fake", logger)
-    assert out.iloc[0]["NUM chassis"] == "AAA-FIRST"
+    assert out.iloc[0]["num_chassis"] == "AAA-FIRST"
 
     # Reversing source row order must not change the outcome.
     df_reversed = df.iloc[::-1].reset_index(drop=True)
     logger2 = PipelineLogger("cp")
     with patch("cp.pd.read_excel", return_value=df_reversed):
         out2 = cp.extract_transform(b"fake", logger2)
-    assert out2.iloc[0]["NUM chassis"] == "AAA-FIRST"
+    assert out2.iloc[0]["num_chassis"] == "AAA-FIRST"
 
 
 # M3: atomic_reload() refuses to run with empty records, even if a caller

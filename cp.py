@@ -35,6 +35,7 @@ from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_columns, validate_non_empty
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
+from lib.field_mapping import apply_field_mapping
 
 COLLECTION = "cp"
 FILENAME   = "ConditionParticulieres.xls"
@@ -43,26 +44,26 @@ PIPELINE_NAME = "cp"
 HEADER_ROW = 7
 
 COLUMNS_NEEDED = [
-    "Gestionnaire",
-    "WW",
-    "IMM",
-    "NUM chassis",
-    "Marque",
-    "Modèle",
-    "Libellé version long",
-    "Type location",
-    "Date MCE",
-    "Date début contrat",
-    "Date fin contrat",
-    "Type",
-    "Jockey",
+    "gestionnaire",
+    "ww",
+    "imm",
+    "num_chassis",
+    "marque",
+    "modele",
+    "libelle_version_long",
+    "type_location",
+    "date_mce",
+    "date_debut_contrat",
+    "date_fin_contrat",
+    "type_vh_relais",
+    "jockey",
 ]
 
-DATE_COLUMNS = ["Date MCE", "Date début contrat", "Date fin contrat"]
+DATE_COLUMNS = ["date_mce", "date_debut_contrat", "date_fin_contrat"]
 
 INDEX_SPECS = [
-    ([("IMM", 1)], "imm"),
-    ([("WW", 1)], "ww"),
+    ([("imm", 1)], "imm"),
+    ([("ww", 1)], "ww"),
 ]
 
 
@@ -93,16 +94,16 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
 
     logger.log("excel_parse", "started", f"parsing {FILENAME}")
     df = pd.read_excel(io.BytesIO(file_bytes), engine="calamine", header=HEADER_ROW)
-    df.columns = [c.strip() for c in df.columns]
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
-    needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
-    logger.log("column_validation", "started")
-    validate_columns(df, needed_stripped)
-    validate_non_empty(df, "WW")
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present, 'WW' not empty")
+    df = apply_field_mapping(df, COLLECTION)
 
-    df = df[needed_stripped].copy()
+    logger.log("column_validation", "started")
+    validate_columns(df, COLUMNS_NEEDED)
+    validate_non_empty(df, "ww")
+    logger.log("column_validation", "success", f"all {len(COLUMNS_NEEDED)} required columns present, 'ww' not empty")
+
+    df = df[COLUMNS_NEEDED].copy()
     rows_in = len(df)
 
     logger.log("transform_filter", "started")
@@ -116,9 +117,9 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
             return False
         return True
 
-    df["_ww_key"]    = df["WW"].apply(lambda x: str(x).strip())
-    df["_sort_date"] = df["Date fin contrat"].apply(parse_date_for_sort)
-    df["_real_imm"]  = df["IMM"].apply(lambda x: 1 if is_real_imm(str(x)) else 0)
+    df["_ww_key"]    = df["ww"].apply(lambda x: str(x).strip())
+    df["_sort_date"] = df["date_fin_contrat"].apply(parse_date_for_sort)
+    df["_real_imm"]  = df["imm"].apply(lambda x: 1 if is_real_imm(str(x)) else 0)
 
     # Drop rows where WW is empty
     df = df[~df["_ww_key"].isin(["", "nan"])]
@@ -135,7 +136,7 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     # same end date) fell back on pandas' stable sort preserving whatever
     # order Excel happened to export rows in, which isn't guaranteed to
     # stay consistent across re-exports of the same underlying data.
-    df["_chassis_key"] = df["NUM chassis"].apply(lambda x: str(x).strip())
+    df["_chassis_key"] = df["num_chassis"].apply(lambda x: str(x).strip())
     df = df.sort_values(
         ["_ww_key", "_real_imm", "_sort_date", "_chassis_key"],
         ascending=[True, False, False, True],
@@ -144,12 +145,12 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
 
     df = df.drop(columns=["_sort_date", "_real_imm", "_ww_key", "_chassis_key"])
 
-    for col in [c.strip() for c in DATE_COLUMNS]:
+    for col in DATE_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(lambda v: format_date(v, CP_PARC_FORMATS))
 
     for col in df.columns:
-        if col not in [c.strip() for c in DATE_COLUMNS]:
+        if col not in DATE_COLUMNS:
             df[col] = df[col].apply(clean_val)
 
     rows_out = len(df)

@@ -33,36 +33,43 @@ from dotenv import load_dotenv
 
 from pymongo.errors import PyMongoError
 
-from lib.transform import BC_DS_FORMATS, clean_val, format_date
+from lib.transform import BC_DS_FORMATS, clean_numeric, clean_val, format_date
 from lib.validate import validate_columns, validate_non_empty
-from lib.mongo import df_to_mongo_records, date_scoped_reload, get_mongo_db, log_refresh_counts
+from lib.mongo import df_to_mongo_records, date_scoped_reload, ensure_indexes, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
+from lib.field_mapping import apply_field_mapping
 
 COLLECTION = "bc"
 FILENAME   = "YBONTEC.xlsx"
 PIPELINE_NAME = "bc"
 
-# Exact header names as they appear in the xlsx (will be stripped during match)
 COLUMNS_NEEDED = [
-    "N° BC",              # trailing spaces stripped at match time → renamed to CMD Num
-    "Immatriculation",
-    "Date BC",
-    "Fournisseurs",
-    "Code article",
-    "Description article",
-    "PU",
-    "Qté",
-    "N° DS",
-    "Cree par",
+    "cmd_num",
+    "immatriculation",
+    "date_bc",
+    "fournisseurs",
+    "code_article",
+    "description_article",
+    "pu",
+    "qte",
+    "n_ds",
+    "cree_par",
 ]
 
-# Rename map: stripped source name → output name
-RENAME = {
-    "N° BC": "CMD Num",
-}
+DATE_COLUMNS = ["date_bc"]
+DATE_FIELD = "date_bc"
+# pu/qte are stored as native BSON numbers, not strings -- see
+# lib.transform.clean_numeric(). jalal's own aggregation code already
+# tolerates either representation defensively ($toString/$convert), so
+# this is a safe cutover; see the field-mapping deploy plan for the
+# Phase 2 audit that confirmed it.
+NUMERIC_COLUMNS = ["pu", "qte"]
 
-DATE_COLUMNS = ["Date BC"]
-DATE_FIELD = "Date BC"
+# "cmd_num_code_article" already covers cmd_num (as its leftmost field) --
+# only the immatriculation+date_bc compound is missing.
+INDEX_SPECS = [
+    ([("immatriculation", 1), ("date_bc", -1)], "immatriculation_date_bc"),
+]
 
 
 # ── Excel → Mongo records ──────────────────────────────────────────────────────
@@ -73,48 +80,62 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     logger.log("excel_parse", "started", f"parsing {FILENAME}")
     # header=0 → row 1 is the header
     df = pd.read_excel(io.BytesIO(file_bytes), header=0)
-
-    # Strip all column names for safe matching
-    df.columns = [c.strip() for c in df.columns]
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
-    needed_stripped = [c.strip() for c in COLUMNS_NEEDED]
-    logger.log("column_validation", "started")
-    validate_columns(df, needed_stripped)
-    validate_non_empty(df, "N° BC")
-    logger.log("column_validation", "success", f"all {len(needed_stripped)} required columns present, 'N° BC' not empty")
+    df = apply_field_mapping(df, COLLECTION)
 
-    df = df[needed_stripped].copy()
+    logger.log("column_validation", "started")
+    validate_columns(df, COLUMNS_NEEDED)
+    validate_non_empty(df, "cmd_num")
+    logger.log("column_validation", "success", f"all {len(COLUMNS_NEEDED)} required columns present, 'cmd_num' not empty")
+
+    df = df[COLUMNS_NEEDED].copy()
     rows_in = len(df)
 
     logger.log("transform_filter", "started")
 
     # Date columns → ISO string
-    for col in [c.strip() for c in DATE_COLUMNS]:
+    for col in DATE_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(lambda v: format_date(v, BC_DS_FORMATS))
 
+    # Numeric columns → native int/float (or None if blank/malformed)
+    raw_numeric = {col: df[col].copy() for col in NUMERIC_COLUMNS if col in df.columns}
+    for col in NUMERIC_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_numeric)
+
     # All other columns → clean string
     for col in df.columns:
-        if col not in [c.strip() for c in DATE_COLUMNS]:
+        if col not in DATE_COLUMNS and col not in NUMERIC_COLUMNS:
             df[col] = df[col].apply(clean_val)
 
-    # Rename
-    df.rename(columns=RENAME, inplace=True)
+    # A malformed (non-blank) numeric cell is set to null, same as a
+    # blank one, but logged as a warning rather than passing silently --
+    # never crashes the run, never silently coerces to 0.
+    for col, raw in raw_numeric.items():
+        blank = raw.apply(lambda v: v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "")
+        malformed = df[col].isna() & ~blank
+        if malformed.any():
+            samples = raw[malformed].astype(str).head(5).tolist()
+            logger.log(
+                "transform_filter", "warning",
+                f"{int(malformed.sum())} malformed '{col}' value(s) set to null, e.g. {samples}",
+            )
 
-    # Drop rows where CMD Num is empty
-    df = df[df["CMD Num"].notna() & (df["CMD Num"].str.strip() != "")]
+    # Drop rows where cmd_num is empty
+    df = df[df["cmd_num"].notna() & (df["cmd_num"].str.strip() != "")]
     rows_out = len(df)
     logger.log(
         "transform_filter", "success",
-        f"{rows_in} rows in, {rows_out} rows out, {rows_in - rows_out} dropped (missing CMD Num)",
+        f"{rows_in} rows in, {rows_out} rows out, {rows_in - rows_out} dropped (missing cmd_num)",
     )
 
     return df
 
 
 def extract_mongo_records(df: pd.DataFrame, year: int) -> tuple[list[dict], object]:
-    records = df_to_mongo_records(df, DATE_COLUMNS)
+    records = df_to_mongo_records(df, DATE_COLUMNS, NUMERIC_COLUMNS)
     year_records = [r for r in records if r.get(DATE_FIELD) is not None and r[DATE_FIELD].year == year]
 
     if not year_records:
@@ -153,6 +174,10 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
         "mongo_push", "success",
         f"before={before_count} after={after_count} diff={after_count - before_count}",
     )
+
+    logger.log("index_ensure", "started", f"{len(INDEX_SPECS)} index(es) on '{COLLECTION}'")
+    ensure_indexes(db, COLLECTION, INDEX_SPECS)
+    logger.log("index_ensure", "success")
 
     db.client.close()
     return True

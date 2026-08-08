@@ -43,6 +43,46 @@ def format_date(val, formats):
     return ""
 
 
+def clean_numeric(val):
+    """Convert a raw Excel cell (km/qte/pu) to a native Python int/float,
+    or None if it's blank or genuinely unparseable. Never coerces a bad
+    value to 0 -- a blank/malformed cell and a real zero must stay
+    distinguishable downstream.
+
+    Thousands separators (comma, space, NBSP) are stripped before
+    parsing -- never treated as a decimal point -- matching jalal's
+    existing defensive $toString/$replaceAll/$convert aggregation logic
+    for these same fields (see app/api/ds/history/route.ts,
+    app/api/article/route.ts), so a value that round-trips through this
+    parser and jalal's parser agrees. A value that parses to a whole
+    number returns int, otherwise float -- e.g. "1,200" -> 1200,
+    "1234.50" -> 1234.5.
+    """
+    if val is None:
+        return None
+    try:
+        if pd.isnull(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+            return None
+        f = float(val)
+    else:
+        s = str(val).strip()
+        if not s:
+            return None
+        s = s.replace(",", "").replace(" ", "").replace("\xa0", "")
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+    return int(f) if f == int(f) else f
+
+
 def clean_val(val):
     if val is None:
         return ""

@@ -48,13 +48,20 @@ def get_mongo_db(env_path: Path | None = None):
     return client[db_name]
 
 
-def df_to_mongo_records(df: pd.DataFrame, date_columns: list[str]) -> list[dict]:
+def df_to_mongo_records(
+    df: pd.DataFrame, date_columns: list[str], numeric_columns: list[str] | None = None
+) -> list[dict]:
     """Convert a pipeline's transformed DataFrame directly into Mongo-ready
     dicts: date_columns (already ISO 8601 strings from format_date()) are
-    parsed to Python datetime (or None if blank/unparseable), every other
-    blank field is dropped, and non-empty fields are kept as their
-    already-cleaned string value."""
+    parsed to Python datetime (or None if blank/unparseable); numeric_columns
+    (already native int/float/None from lib.transform.clean_numeric()) are
+    kept as-is, explicitly written as null rather than dropped when None,
+    since for these fields "no value" must stay distinguishable from "field
+    absent" -- unlike every other blank field, which is dropped; and every
+    other field is kept as its already-cleaned string value, or dropped if
+    blank."""
     df = df.copy()
+    numeric_columns = numeric_columns or []
 
     for col in date_columns:
         if col in df.columns:
@@ -68,6 +75,16 @@ def df_to_mongo_records(df: pd.DataFrame, date_columns: list[str]) -> list[dict]
         for k, v in rec.items():
             if k in date_columns:
                 doc[k] = v.to_pydatetime() if pd.notna(v) else None
+            elif k in numeric_columns:
+                if pd.isna(v):
+                    doc[k] = None
+                else:
+                    # A column mixing ints with None is upcast by pandas
+                    # to float64 (None -> NaN), which would otherwise
+                    # silently turn e.g. km=1200 into km=1200.0 here --
+                    # collapse back to int whenever the value is whole.
+                    f = float(v)
+                    doc[k] = int(f) if f == int(f) else f
             else:
                 if pd.isna(v) or str(v).strip() == "":
                     continue
@@ -155,6 +172,16 @@ def date_scoped_reload(db, collection_name: str, records: list[dict], date_field
 
     print(f"  🗑️  Deleted {deleted_count} records from {earliest_date.date()} to end of {year}", flush=True)
     print(f"  ✅ Inserted {len(records)} records for {year}", flush=True)
+
+
+def ensure_indexes(db, collection_name: str, index_specs) -> None:
+    """Idempotently ensure each (keys, name) in index_specs exists on
+    collection_name -- create_index() is a no-op if an identical index
+    (same keys + options) already exists under that name, so this is safe
+    to call on every reload without error or duplicate-index issues.
+    Additive only: never touches existing documents or other indexes."""
+    for keys, name in index_specs:
+        db[collection_name].create_index(keys, name=name)
 
 
 def log_refresh_counts(before_count: int, after_count: int) -> None:

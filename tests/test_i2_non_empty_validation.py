@@ -7,53 +7,55 @@ import pytest
 
 from lib.validate import validate_any_non_empty, validate_non_empty
 
-# ds: N°DS, bc: N° BC (pre-rename), cp: WW, parc: Immatriculation/Numéro WW
+# validate_non_empty()/validate_any_non_empty() run after apply_field_mapping()
+# in every pipeline, so they see clean keys, not raw Excel headers:
+# ds: n_ds, bc: cmd_num (post-rename), cp: ww, parc: immatriculation/numero_ww
 
 
 def test_mostly_populated_column_passes():
-    df = pd.DataFrame({"N°DS": [f"DS{i}" for i in range(100)]})
-    validate_non_empty(df, "N°DS")  # must not raise
+    df = pd.DataFrame({"n_ds": [f"DS{i}" for i in range(100)]})
+    validate_non_empty(df, "n_ds")  # must not raise
 
 
 def test_all_empty_column_raises():
-    df = pd.DataFrame({"WW": [""] * 100})
+    df = pd.DataFrame({"ww": [""] * 100})
     with pytest.raises(ValueError, match="empty"):
-        validate_non_empty(df, "WW")
+        validate_non_empty(df, "ww")
 
 
 def test_mostly_empty_column_over_threshold_raises():
-    df = pd.DataFrame({"CMD Num": ["X"] * 4 + [""] * 96})  # 96% empty
+    df = pd.DataFrame({"cmd_num": ["X"] * 4 + [""] * 96})  # 96% empty
     with pytest.raises(ValueError, match="empty"):
-        validate_non_empty(df, "CMD Num")
+        validate_non_empty(df, "cmd_num")
 
 
 def test_just_under_threshold_passes():
-    df = pd.DataFrame({"CMD Num": ["X"] * 6 + [""] * 94})  # 94% empty, threshold 95%
-    validate_non_empty(df, "CMD Num")  # must not raise
+    df = pd.DataFrame({"cmd_num": ["X"] * 6 + [""] * 94})  # 94% empty, threshold 95%
+    validate_non_empty(df, "cmd_num")  # must not raise
 
 
 def test_missing_column_is_noop_not_validate_columns_job():
     df = pd.DataFrame({"other": [1, 2, 3]})
-    validate_non_empty(df, "N°DS")  # must not raise -- validate_columns() catches this
+    validate_non_empty(df, "n_ds")  # must not raise -- validate_columns() catches this
 
 
 def test_empty_dataframe_is_noop():
-    df = pd.DataFrame({"N°DS": []})
-    validate_non_empty(df, "N°DS")  # must not raise -- nothing to be a fraction of
+    df = pd.DataFrame({"n_ds": []})
+    validate_non_empty(df, "n_ds")  # must not raise -- nothing to be a fraction of
 
 
 def test_any_non_empty_passes_when_one_column_populated():
     df = pd.DataFrame({
-        "Immatriculation": ["A1"] * 100,
-        "Numéro WW": [""] * 100,
+        "immatriculation": ["A1"] * 100,
+        "numero_ww": [""] * 100,
     })
-    validate_any_non_empty(df, ["Immatriculation", "Numéro WW"])  # must not raise
+    validate_any_non_empty(df, ["immatriculation", "numero_ww"])  # must not raise
 
 
 def test_any_non_empty_raises_when_both_columns_empty():
     df = pd.DataFrame({
-        "Immatriculation": [""] * 100,
-        "Numéro WW": [""] * 100,
+        "immatriculation": [""] * 100,
+        "numero_ww": [""] * 100,
     })
     with pytest.raises(ValueError, match="blank"):
-        validate_any_non_empty(df, ["Immatriculation", "Numéro WW"])
+        validate_any_non_empty(df, ["immatriculation", "numero_ww"])
