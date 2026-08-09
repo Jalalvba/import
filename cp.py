@@ -35,7 +35,7 @@ from lib.transform import CP_PARC_FORMATS, clean_val, format_date
 from lib.validate import validate_columns, validate_non_empty
 from lib.mongo import atomic_reload, df_to_mongo_records, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
-from lib.field_mapping import apply_field_mapping
+from lib.field_mapping import apply_field_mapping, validate_against_registry
 
 COLLECTION = "cp"
 FILENAME   = "ConditionParticulieres.xls"
@@ -97,6 +97,7 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
     df = apply_field_mapping(df, COLLECTION)
+    validate_against_registry(COLLECTION, COLUMNS_NEEDED)
 
     logger.log("column_validation", "started")
     validate_columns(df, COLUMNS_NEEDED)
@@ -176,7 +177,7 @@ def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> bool:
     db = get_mongo_db()
     logger.log("mongo_connect", "success")
 
-    before_count = db[COLLECTION].count_documents({})
+    before_count = db[COLLECTION].estimated_document_count()
 
     logger.log("mongo_push", "started", f"{len(records)} records")
     try:
@@ -186,7 +187,7 @@ def push_to_mongo(df: pd.DataFrame, logger: PipelineLogger) -> bool:
         db.client.close()
         sys.exit(1)
 
-    after_count = db[COLLECTION].count_documents({})
+    after_count = db[COLLECTION].estimated_document_count()
     log_refresh_counts(before_count, after_count)
     logger.log(
         "mongo_push", "success",

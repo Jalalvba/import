@@ -159,7 +159,7 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
     db = get_mongo_db()
     logger.log("mongo_connect", "success")
 
-    before_count = db[COLLECTION].count_documents({})
+    before_count = db[COLLECTION].estimated_document_count()
 
     logger.log("mongo_push", "started", f"{len(records)} records, earliest={earliest_date.date()}")
     try:
@@ -169,7 +169,7 @@ def push_to_mongo(df: pd.DataFrame, year: int, logger: PipelineLogger) -> bool:
         db.client.close()
         sys.exit(1)
 
-    after_count = db[COLLECTION].count_documents({})
+    after_count = db[COLLECTION].estimated_document_count()
     log_refresh_counts(before_count, after_count)
     logger.log(
         "mongo_push", "success",
