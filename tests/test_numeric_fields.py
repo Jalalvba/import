@@ -81,7 +81,7 @@ def test_df_to_mongo_records_other_columns_still_stringified():
 
 DS_COLUMNS = [
     "Societe", "Site", "Date DS", "N°DS", "Date interv", "N° intervention",
-    "Code art", "Désignation article", "Désignation Consomation ", "Qté",
+    "Code art", "Désignation article", "Désignation Consomation", "Qté",
     "Mt HT DS ", "Immatriculation", "Parc", "Type Parc",
     "Désignation véhicule", "ref CP", "Client Final", "Raison Social",
     "Detenteur DS", "A Facturè", "Affectation", "Client facturé    ",

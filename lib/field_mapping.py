@@ -9,7 +9,17 @@ translation runs on every pipeline execution, forever, not as a one-time
 fix. See CLAUDE.md / the field-mapping deploy plan for the resolution
 history behind specific entries (e.g. why "Entité" is dropped rather than
 renamed).
+
+See also validate_against_registry() below: this file's mapping strings
+are hand-typed and have drifted from reality before (a trailing-space
+typo silently broke a rename for months). That function cross-checks the
+mapping against field_registry.json -- a live scan of what MongoDB
+actually contains (scripts/export_field_registry.py) -- instead of
+trusting FIELD_MAPS on faith.
 """
+
+import json
+from pathlib import Path
 
 DS_FIELD_MAP = {
     "Societe": "societe",
@@ -20,7 +30,7 @@ DS_FIELD_MAP = {
     "N° intervention": "n_intervention",
     "Code art": "code_art",
     "Désignation article": "designation_article",
-    "Désignation Consomation ": "designation_consommation",
+    "Désignation Consomation": "designation_consommation",
     "Qté": "qte",
     "Mt HT DS ": "mt_ht_ds",
     "Immatriculation": "immatriculation",
@@ -230,3 +240,65 @@ def apply_field_mapping(df, collection: str):
     if dropped:
         df = df.drop(columns=list(dropped), errors="ignore")
     return df.rename(columns=field_map)
+
+
+_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "field_registry.json"
+
+
+def validate_against_registry(collection: str, columns_needed: list[str]) -> None:
+    """Cross-check `collection`'s actively-used clean field names (its
+    pipeline's own COLUMNS_NEEDED -- the only fields that actually reach
+    Mongo, out of everything FIELD_MAPS knows how to rename) against
+    field_registry.json, a live scan of what MongoDB actually contains
+    today (scripts/export_field_registry.py). Call this right after
+    apply_field_mapping(), before COLUMNS_NEEDED selection.
+
+    A field counts as verified if EITHER its clean name or its original
+    dirty name (per FIELD_MAPS[collection]) is present in the registry:
+    the dirty name means it's live under its pre-backfill key (expected
+    and fine before scripts/migrate_field_names.py has run for that
+    field); the clean name means it's already been backfilled. If
+    NEITHER form is found, the mapping has drifted from reality -- e.g. a
+    typo in the clean name (FIELD_MAPS value), or a dirty key
+    (FIELD_MAPS key) that no longer matches any real document -- and this
+    raises loudly instead of letting the pipeline rely on an unverified
+    field name, exactly the class of bug that motivated this check (see
+    CLAUDE.md's field-registry section).
+
+    Deliberately NOT run for every FIELD_MAPS entry, only COLUMNS_NEEDED:
+    most FIELD_MAPS entries are for columns no pipeline currently selects
+    into Mongo, so field_registry.json -- which only ever contains
+    fields a document actually has -- can never confirm or deny them.
+    """
+    if not _REGISTRY_PATH.exists():
+        raise FileNotFoundError(
+            f"field_registry.json not found at {_REGISTRY_PATH} -- run "
+            f"scripts/export_field_registry.py before running any pipeline."
+        )
+    registry = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+    live_fields = set(registry.get("collections", {}).get(collection, []))
+
+    field_map = FIELD_MAPS[collection]
+    clean_to_dirty = {clean: dirty for dirty, clean in field_map.items()}
+
+    unverified = []
+    for clean in columns_needed:
+        dirty = clean_to_dirty.get(clean)
+        if dirty is None:
+            unverified.append((clean, None))
+            continue
+        if clean not in live_fields and dirty not in live_fields:
+            unverified.append((clean, dirty))
+
+    if unverified:
+        details = "; ".join(
+            f"{clean!r} (dirty key {dirty!r})" if dirty else f"{clean!r} -- no FIELD_MAP entry maps to it at all"
+            for clean, dirty in unverified
+        )
+        raise ValueError(
+            f"[{collection}] field_registry.json drift: {len(unverified)} active field(s) match "
+            f"neither their clean nor dirty form in the live-scan registry: {details} -- either "
+            f"FIELD_MAPS[{collection!r}] has a typo (clean-name value or dirty-key), or "
+            f"field_registry.json is stale (re-run scripts/export_field_registry.py after the "
+            f"latest real Mongo state)."
+        )

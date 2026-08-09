@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-08-08T23:26:02.105489+00:00",
+  "source": "live MongoDB scan, not field_mapping.py's intended mappings",
+  "collections": {
+    "ds": [
+      "Désignation Consomation",
+      "cmd_num",
+      "code_art",
+      "date_ds",
+      "description",
+      "entite_nom",
+      "fournisseur",
+      "immatriculation",
+      "km",
+      "n_ds",
+      "qte",
+      "technicien"
+    ],
+    "bc": [
+      "CMD Num",
+      "cmd_num",
+      "code_article",
+      "cree_par",
+      "date_bc",
+      "description_article",
+      "fournisseurs",
+      "immatriculation",
+      "n_ds",
+      "pu",
+      "qte"
+    ],
+    "cp": [
+      "date_debut_contrat",
+      "date_fin_contrat",
+      "date_mce",
+      "gestionnaire",
+      "imm",
+      "jockey",
+      "libelle_version_long",
+      "marque",
+      "modele",
+      "num_chassis",
+      "type_location",
+      "type_vh_relais",
+      "ww"
+    ],
+    "parc": [
+      "client",
+      "date_mce",
+      "etat_vehicule",
+      "immatriculation",
+      "locataire",
+      "marque",
+      "modele",
+      "n_de_chassis",
+      "numero_ww",
+      "type_location"
+    ]
+  }
+}
