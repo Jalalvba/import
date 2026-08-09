@@ -54,6 +54,15 @@ DS_FIELD_MAP = {
     "Old CMD Num": "old_cmd_num",
     "Founisseur": "fournisseur",
     "Code entité": "code_entite",
+    # DELIBERATE (2026-08-09): ds's "ENTITE" clean name is "entite_nom",
+    # not "entite" -- deliberately different from bc's "Entité" -> "entite"
+    # below. Not a naming-drift bug: ds already has a separate "code_entite"
+    # (from "Code entité"), so "entite_nom" disambiguates the two ds fields;
+    # bc has no such pair, so "entite" alone is unambiguous there. Do not
+    # "fix" these to match each other without first checking whether jalal's
+    # aggregation code (or the frontend) already queries either collection
+    # by its current name -- if so, reconcile via a migration, not a silent
+    # rename.
     "ENTITE": "entite_nom",
     "Description": "description",
     "Besoin pièce": "besoin_piece",
@@ -103,6 +112,10 @@ BC_FIELD_MAP = {
     "Remise article": "remise_article",
     "Montant HT ": "montant_ht",
     "Total HT BC": "total_ht_bc",
+    # DELIBERATE (2026-08-09): named "entite" here, not "entite_nom" like
+    # ds's equivalent field above -- see the comment on ds's "ENTITE" entry
+    # for why the two collections use different clean names for the same
+    # real-world concept.
     "Entité": "entite",
     "Marque": "marque",
     "Signé": "signe",
@@ -118,6 +131,18 @@ BC_FIELD_MAP = {
     " Derniere Date Reception": "derniere_date_reception",
 }
 
+# DELIBERATE (2026-08-09): most of CP_FIELD_MAP below is never selected
+# into cp.py's COLUMNS_NEEDED (e.g. "avenant", "conducteur",
+# "bon_de_commande", "km_consomme" and others have no Mongo consumer
+# today) -- this is not dead mapping code to prune. FIELD_MAPS is a
+# permanent translation of every column the DMS export produces (see this
+# file's module docstring); apply_field_mapping() raises if any raw Excel
+# column is unmapped, so every column must have an entry here regardless
+# of whether a pipeline currently uses it. If a future column looks
+# "unused" in COLUMNS_NEEDED, that's expected -- check COLUMNS_NEEDED (not
+# this map) to see what actually reaches Mongo; see also
+# validate_against_registry()'s docstring below for why only
+# COLUMNS_NEEDED entries get checked against field_registry.json.
 CP_FIELD_MAP = {
     "Nature": "nature",
     "Statut": "statut",

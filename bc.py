@@ -63,6 +63,13 @@ DATE_FIELD = "date_bc"
 NUMERIC_COLUMNS = ["pu", "qte"]
 
 # "cmd_num_code_article" already covers cmd_num (as its leftmost field).
+# DELIBERATE (2026-08-09): "code_article" is likewise already covered by
+# that same existing "cmd_num_code_article" index. "description_article",
+# "n_ds", and "cree_par" are extracted/stored (see COLUMNS_NEEDED above)
+# but have no index -- same pattern as ds.py's "technicien": not currently
+# queried by the frontend, so no index is needed for them today. If the
+# frontend starts filtering/sorting bc by any of these three, add the
+# matching index here rather than assuming its absence is an oversight.
 INDEX_SPECS = [
     ([("immatriculation", 1), ("date_bc", -1)], "immatriculation_date_bc"),
     ([("fournisseurs", 1), ("date_bc", -1)], "fournisseurs_date_bc"),
