@@ -17,7 +17,7 @@ def test_ds_index_specs_are_created():
 
     indexes = db["ds"].index_information()
     assert indexes["cmd_num"]["key"] == [("cmd_num", 1)]
-    assert indexes["technicien"]["key"] == [("technicien", 1)]
+    assert indexes["entite_nom_date_ds"]["key"] == [("entite_nom", 1), ("date_ds", -1)]
 
 
 def test_bc_index_specs_are_created():
