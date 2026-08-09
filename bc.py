@@ -23,13 +23,10 @@ Requirements:
 """
 
 import io
-import os
 import sys
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from pymongo.errors import PyMongoError
 
@@ -207,54 +204,10 @@ def main(file_bytes: bytes, year: int | None = None, logger: PipelineLogger | No
 
 
 if __name__ == "__main__":
-    from lib.gdrive import download_file_bytes, find_file_metadata, verify_download_size
-    from lib.pipeline_state import force_requested, release_lock, resolve_pipeline_run, update_state
-
-    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    if not folder_id:
-        raise EnvironmentError("❌ GOOGLE_DRIVE_FOLDER_ID not set in .env")
+    from lib.cli_run import run_standalone_pipeline
 
     arg_year = int(sys.argv[1]) if len(sys.argv) > 1 else None
-
-    run_logger = PipelineLogger(PIPELINE_NAME)
-    run_logger.log("drive_auth", "started")
-    try:
-        file_meta = find_file_metadata(folder_id, FILENAME)
-    except Exception as e:
-        run_logger.log("drive_auth", "failed", str(e))
-        run_logger.finish("failed")
-        raise
-    run_logger.log("drive_auth", "success")
-
-    if file_meta is None:
-        run_logger.log("drive_listing", "failed", f"{FILENAME} not found in Drive folder")
-        run_logger.finish("failed")
-        raise FileNotFoundError(f"❌ '{FILENAME}' not found in Drive folder {folder_id}")
-    run_logger.log("drive_listing", "success", f"located {FILENAME} in Drive folder")
-
-    decision = resolve_pipeline_run(PIPELINE_NAME, file_meta, run_logger, force=force_requested())
-    if decision in ("skip_unchanged", "already_running"):
-        sys.exit(0)
-    if decision == "hard_fail":
-        sys.exit(1)
-
-    try:
-        fetched_bytes = download_file_bytes(file_meta["id"])
-        try:
-            verify_download_size(fetched_bytes, file_meta)
-        except ValueError as e:
-            run_logger.log("file_download", "failed", str(e))
-            run_logger.finish("failed")
-            raise
-        run_logger.log("file_download", "success", f"{FILENAME}: {len(fetched_bytes):,} bytes")
-
-        try:
-            status = main(fetched_bytes, arg_year, logger=run_logger)
-        except BaseException:
-            raise
-        else:
-            if status == "success":
-                update_state(PIPELINE_NAME, FILENAME, file_meta["id"], file_meta["modifiedTime"], run_logger.run_id)
-    finally:
-        release_lock(PIPELINE_NAME, run_logger.run_id)
+    run_standalone_pipeline(
+        PIPELINE_NAME, FILENAME, __file__,
+        lambda file_bytes, run_logger: main(file_bytes, arg_year, logger=run_logger),
+    )
