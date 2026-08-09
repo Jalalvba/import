@@ -62,10 +62,10 @@ DATE_FIELD = "date_bc"
 # Phase 2 audit that confirmed it.
 NUMERIC_COLUMNS = ["pu", "qte"]
 
-# "cmd_num_code_article" already covers cmd_num (as its leftmost field) --
-# only the immatriculation+date_bc compound is missing.
+# "cmd_num_code_article" already covers cmd_num (as its leftmost field).
 INDEX_SPECS = [
     ([("immatriculation", 1), ("date_bc", -1)], "immatriculation_date_bc"),
+    ([("fournisseurs", 1), ("date_bc", -1)], "fournisseurs_date_bc"),
 ]
 
 

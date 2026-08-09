@@ -39,11 +39,12 @@ COLLECTION = "ds"
 FILENAME   = "YFACSCALDS.xlsx"
 PIPELINE_NAME = "ds"
 
-# "immatriculation_date_ds" already exists on the live collection --
-# only these two are missing.
+# "immatriculation_date_ds" already exists on the live collection.
 INDEX_SPECS = [
     ([("cmd_num", 1)], "cmd_num"),
     ([("technicien", 1)], "technicien"),
+    ([("technicien", 1), ("date_ds", -1)], "technicien_date_ds"),
+    ([("entite_nom", 1), ("date_ds", -1)], "entite_nom_date_ds"),
 ]
 
 COLUMNS_NEEDED = [
