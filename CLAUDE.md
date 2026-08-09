@@ -230,7 +230,7 @@ db.pipeline_runs.find_one({ run_id: "<id>" })
 
 ## Data & File Paths
 
-All paths below are relative to the repo root (wherever this project is checked out) — nothing is hardcoded to a fixed home-directory location, though older docstrings in some scripts still reference a prior `~/avis/` path from before the project was renamed.
+All paths below are relative to the repo root (wherever this project is checked out) — nothing is hardcoded to a fixed home-directory location. No script docstring references a `~/avis/` path anymore.
 
 ```
 ./
