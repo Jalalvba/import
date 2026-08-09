@@ -74,7 +74,7 @@ required. There are no linters or CI configured.
 Each is a standalone, independently-runnable module with the same shape. Every step below is recorded via a `PipelineLogger` (`lib/pipeline_log.py`) passed into `extract_transform()`/`push_to_mongo()` — the same `.log()` call both prints to the console and appends to the run's `pipeline_runs` document, so the two can never drift out of sync:
 
 1. **Fetch** the source file's bytes from the Google Drive folder (`GOOGLE_DRIVE_FOLDER_ID` in `.env`) via `lib.gdrive` — but only after two gates, both logged as their own steps: a `skip_check` step compares the file's Drive `id` + `modifiedTime` against `pipeline_state` (see [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection) below) and skips the entire run — no download, no write to the pipeline's data collection — if unchanged since the last successful run; then a `size_check` step classifies the file's Drive-reported byte size (see [File Size Handling](#file-size-handling--heavy-excel-exports) below) as normal / warn / hard-fail. Immediately after `download_file_bytes()` returns, `lib.gdrive.verify_download_size()` compares the actual byte count against Drive's own reported `size` (already fetched during listing) and raises if they don't match — catching a short read that Drive terminates as a clean 200, which would otherwise let calamine/openpyxl silently parse a truncated file as fewer rows instead of erroring. A mismatch is logged as a `file_download: failed` step and fails that pipeline's run (run via `run.py`, the other three pipelines still proceed). Run standalone, a script's own `if __name__ == "__main__"` block looks up its file's metadata only (`lib.gdrive.find_file_metadata`, no bytes yet), runs both gates, then downloads, verifies the size, and logs `drive_auth`/`drive_listing`/`skip_check`/`size_check`/`file_download` steps before invoking `main()`; run via `run.py`, all four files' **metadata** is listed once upfront (one shared Drive listing pass, no bytes yet) and the same gates + steps are logged into each pipeline's own logger, with bytes downloaded only for the pipelines that actually need to run
-2. **Read** Excel from those in-memory bytes (`pd.read_excel(io.BytesIO(file_bytes), ...)`) — XLSX files use openpyxl engine, legacy XLS files use calamine engine (`excel_parse` step)
+2. **Read** Excel from those in-memory bytes (`pd.read_excel(io.BytesIO(file_bytes), ...)`) — all four pipelines use the `calamine` engine (`excel_parse` step)
 3. **Validate** required columns exist via `lib.validate.validate_columns` (fail loudly if missing; `column_validation` step), then that each pipeline's natural-key column isn't (almost) entirely empty, via `lib.validate.validate_non_empty`/`validate_any_non_empty` (default threshold: fail if >95% blank) — `validate_columns` only checks a column exists, so a column that's present but broken/renamed upstream and comes through entirely empty would otherwise pass silently, then `lib.mongo`'s blank-field-dropping means affected documents end up missing that key entirely. Checked column per pipeline: `ds.py` → `N°DS`, `bc.py` → `N° BC` (pre-rename to `CMD Num`), `cp.py` → `WW`, `parc.py` → `Immatriculation` OR `Numéro WW` (only fails if *both* are ~entirely empty, matching the row-filter's "at least one populated" business rule)
 4. **Transform** — apply `lib.transform.format_date()`/`clean_val()`
 5. **Filter** rows based on business rules (drop records missing key identifiers), and for `cp.py`, deduplicate by WW identifier (preferring a valid `IMM` code, keeping the latest contract end date) — this dedup logic is CP-specific and stays inline rather than living in `lib/`. Steps 4–5 together are logged as one `transform_filter` step with rows-in/rows-out/dropped-and-why detail
@@ -82,8 +82,6 @@ Each is a standalone, independently-runnable module with the same shape. Every s
    - `ds.py`/`bc.py` — date-scoped partial refresh (`date_scoped_reload`), scoped on `Date DS`/`Date BC` respectively
    - `cp.py`/`parc.py` — atomic full reload (`atomic_reload`)
 7. **Finish the run log** — `main()` calls `logger.finish("success"|"failed")` in a `try/except`, which flips the already-incrementally-written `pipeline_runs` document's `status`/`finished_at` in place (including a `pipeline_error` step with the exception detail on failure) — there's no separate persist step, since every prior step was already written to Mongo as it happened (see the `lib/pipeline_log.py` bullet above)
-
-`parc.py` and `cp.py` read legacy XLS with `engine="calamine"`.
 
 Each script's `extract_transform()`/`main()` take `file_bytes: bytes` as a parameter rather than reading a hardcoded local path — there is no `INPUT_FILE`/`INPUT_DIR` constant in any of the four scripts anymore, and the local `input/` folder has been deleted entirely (it's gone from disk, not just unreferenced). There is likewise no `output/` folder, `OUTPUT_CSV` constant, or `lib/paths.py` anymore — the CSV intermediate was removed entirely, not just made conditional on environment.
 
@@ -276,6 +274,30 @@ persistent `.env` entry — set it inline for a single invocation
 (`PIPELINE_FORCE_RUN=1 python3 run.py`) to bypass the skip-if-unchanged
 check. See [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection)
 above.
+
+## field_registry.json — regenerate whenever real Mongo field names change
+
+`field_registry.json` (repo root) is a **live scan** of the exact, distinct
+field names actually present across all documents in `ds`/`bc`/`cp`/`parc` —
+ground truth, not what `lib/field_mapping.py`'s `FIELD_MAPS` claims should be
+there. Generated by `scripts/export_field_registry.py` (read-only, safe to
+re-run anytime). Two consumers depend on it: `lib/field_mapping.py`'s
+`validate_against_registry()` (called by every pipeline right after
+`apply_field_mapping()`, raises loudly on drift) and jalal's
+`scripts/verify-field-names.cjs` (a copy of this same file, checked in CI).
+
+**Regenerate it (`python3 scripts/export_field_registry.py`), then copy the
+result into jalal (`cp field_registry.json ~/jalal/field_registry.json`),
+whenever:**
+- `scripts/migrate_field_names.py --execute` actually backfills a collection
+  (dirty keys become clean keys on real documents).
+- Any `FIELD_MAPS` entry in `lib/field_mapping.py` changes.
+- Any other manual migration/write adds, renames, or removes a field on
+  `ds`/`cp`/`parc`/`bc`.
+
+Skipping this step doesn't break anything visibly — both checks just keep
+validating against a stale snapshot instead of current reality, silently
+losing the protection this whole layer exists for.
 
 ## Where to find more detail
 

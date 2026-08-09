@@ -18,7 +18,7 @@ Usage:
     python ds.py 2026      # explicit year
 
 Requirements:
-    pip install pandas openpyxl pymongo python-dotenv google-api-python-client google-auth
+    pip install pandas python-calamine pymongo python-dotenv google-api-python-client google-auth
 """
 
 import io
@@ -36,7 +36,7 @@ from lib.transform import BC_DS_FORMATS, clean_numeric, clean_val, format_date
 from lib.validate import validate_columns, validate_non_empty
 from lib.mongo import df_to_mongo_records, date_scoped_reload, ensure_indexes, get_mongo_db, log_refresh_counts
 from lib.pipeline_log import PipelineLogger
-from lib.field_mapping import apply_field_mapping
+from lib.field_mapping import apply_field_mapping, validate_against_registry
 
 COLLECTION = "ds"
 FILENAME   = "YFACSCALDS.xlsx"
@@ -79,10 +79,11 @@ def extract_transform(file_bytes: bytes, logger: PipelineLogger) -> pd.DataFrame
         raise ValueError(f"❌ No bytes provided for {FILENAME}")
 
     logger.log("excel_parse", "started", f"parsing {FILENAME}")
-    df = pd.read_excel(io.BytesIO(file_bytes), header=1)
+    df = pd.read_excel(io.BytesIO(file_bytes), engine="calamine", header=1)
     logger.log("excel_parse", "success", f"read {len(df)} rows, {len(df.columns)} columns")
 
     df = apply_field_mapping(df, COLLECTION)
+    validate_against_registry(COLLECTION, COLUMNS_NEEDED)
 
     logger.log("column_validation", "started")
     validate_columns(df, COLUMNS_NEEDED)
