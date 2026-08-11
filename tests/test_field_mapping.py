@@ -59,3 +59,37 @@ def test_no_clean_key_collisions_within_each_map(collection):
     clean_keys = list(FIELD_MAPS[collection].values())
     duplicates = {k for k in clean_keys if clean_keys.count(k) > 1}
     assert not duplicates, f"{collection}: duplicate clean keys {duplicates}"
+
+
+@pytest.mark.parametrize("raw_column", ["Désignation Consomation", "Désignation Consomation "])
+def test_designation_consommation_whitespace_variants_both_map(raw_column):
+    """Regression for the upstream DMS export flipping this column's
+    trailing whitespace between runs (broke prod twice, in opposite
+    directions -- see field_mapping.py's apply_field_mapping docstring).
+    Both the with- and without-trailing-space variants must map to the
+    same clean key regardless of which exact form FIELD_MAPS hardcodes."""
+    raw_columns = list(DS_FIELD_MAP.keys())
+    raw_columns = [c for c in raw_columns if c != "Désignation Consomation"] + [raw_column]
+    df = pd.DataFrame({col: ["x"] for col in raw_columns})
+
+    out = apply_field_mapping(df, "ds")
+
+    assert "designation_consommation" in out.columns
+    assert out["designation_consommation"].iloc[0] == "x"
+
+
+def test_apply_field_mapping_whitespace_tolerant_for_all_maps():
+    """Any dirty key in any FIELD_MAPS collection must still match after
+    adding or removing surrounding whitespace on the raw column name."""
+    for collection, field_map in FIELD_MAPS.items():
+        for dirty_key, clean_key in field_map.items():
+            variant = dirty_key.strip() if dirty_key != dirty_key.strip() else f" {dirty_key} "
+            other_columns = [k for k in field_map if k != dirty_key]
+            df = pd.DataFrame({col: ["x"] for col in other_columns + [variant]})
+
+            out = apply_field_mapping(df, collection)
+
+            assert clean_key in out.columns, (
+                f"[{collection}] whitespace variant {variant!r} of {dirty_key!r} "
+                f"did not map to {clean_key!r}"
+            )

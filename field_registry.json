@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-08T23:26:02.105489+00:00",
+  "generated_at": "2026-08-11T11:39:26.762033+00:00",
   "source": "live MongoDB scan, not field_mapping.py's intended mappings",
   "collections": {
     "ds": [

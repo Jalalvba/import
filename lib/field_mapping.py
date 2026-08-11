@@ -19,7 +19,10 @@ trusting FIELD_MAPS on faith.
 """
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DS_FIELD_MAP = {
     "Societe": "societe",
@@ -231,12 +234,58 @@ DROPPED_COLUMNS = {
 }
 
 
+def _stripped_lookup(keys) -> dict[str, str]:
+    """Build a {stripped_key: original_key} lookup for a set/iterable of
+    dirty column names, used to match incoming Excel columns whose
+    leading/trailing whitespace may not match FIELD_MAPS/DROPPED_COLUMNS
+    exactly (see apply_field_mapping's docstring). Collision-free by
+    construction: verified once at import time below via
+    _assert_no_strip_collisions().
+    """
+    return {k.strip(): k for k in keys}
+
+
+def _assert_no_strip_collisions() -> None:
+    """Two distinct dirty keys in the same FIELD_MAPS/DROPPED_COLUMNS
+    collection that strip down to the same string would make whitespace-
+    tolerant matching ambiguous (which one did the source export mean?).
+    Verified empirically clean today across all four maps, but this guards
+    against a future edit silently introducing one.
+    """
+    for collection, field_map in FIELD_MAPS.items():
+        all_keys = list(field_map.keys()) + list(DROPPED_COLUMNS[collection])
+        seen: dict[str, str] = {}
+        for k in all_keys:
+            s = k.strip()
+            if s in seen and seen[s] != k:
+                raise ValueError(
+                    f"[{collection}] whitespace-strip collision: {seen[s]!r} and {k!r} "
+                    f"both strip to {s!r} -- whitespace-tolerant matching would be "
+                    f"ambiguous between them. Resolve before relying on stripped matching."
+                )
+            seen[s] = k
+
+
+_assert_no_strip_collisions()
+
+
 def apply_field_mapping(df, collection: str):
     """Rename df's raw Excel columns to clean Mongo keys via
     FIELD_MAPS[collection], drop any column in DROPPED_COLUMNS[collection]
     (kept out of the map deliberately -- e.g. ds's "Entité", redundant with
     "Code entité"), and raise loudly if the source Excel contains a column
     that's neither mapped nor an intentional drop.
+
+    Matching is whitespace-tolerant: a raw Excel column is compared to
+    FIELD_MAPS/DROPPED_COLUMNS keys after stripping leading/trailing
+    whitespace from both sides. This is deliberate, not incidental -- the
+    upstream DMS/SGA export has been observed to flip a given column's
+    exact whitespace between runs (e.g. "Désignation Consomation" gained,
+    then lost, then regained a trailing space across real production
+    exports), so a single hardcoded exact-string key can never reliably
+    survive that variability. A column that only matches after stripping
+    is logged (not raised) so drift stays visible even though it's now
+    auto-handled.
 
     This must run immediately after pd.read_excel(), before any other
     transform logic -- every downstream consumer (lib.validate,
@@ -252,19 +301,54 @@ def apply_field_mapping(df, collection: str):
     """
     field_map = FIELD_MAPS[collection]
     dropped = DROPPED_COLUMNS[collection]
+    stripped_map_keys = _stripped_lookup(field_map.keys())
+    stripped_dropped_keys = _stripped_lookup(dropped)
 
-    unmapped = [c for c in df.columns if c not in field_map and c not in dropped]
+    rename = {}
+    drop_cols = []
+    unmapped = []
+    for c in df.columns:
+        if c in field_map:
+            rename[c] = field_map[c]
+            continue
+        if c in dropped:
+            drop_cols.append(c)
+            continue
+        c_stripped = c.strip()
+        if c_stripped in stripped_map_keys:
+            original = stripped_map_keys[c_stripped]
+            if original != c:
+                logger.warning(
+                    "[%s] field_mapping: raw column %r matched %r only after "
+                    "whitespace-stripping -- source export whitespace has drifted "
+                    "from FIELD_MAPS; consider updating the key if this persists.",
+                    collection, c, original,
+                )
+            rename[c] = field_map[original]
+        elif c_stripped in stripped_dropped_keys:
+            original = stripped_dropped_keys[c_stripped]
+            if original != c:
+                logger.warning(
+                    "[%s] field_mapping: raw dropped-column %r matched %r only "
+                    "after whitespace-stripping.",
+                    collection, c, original,
+                )
+            drop_cols.append(c)
+        else:
+            unmapped.append(c)
+
     if unmapped:
         raise ValueError(
             f"[{collection}] unmapped raw Excel column(s): {unmapped} -- "
             f"the source export introduced a column not present in "
             f"lib.field_mapping.{collection.upper()}_FIELD_MAP (or "
-            f"DROPPED_COLUMNS). Add it there before this pipeline can run."
+            f"DROPPED_COLUMNS), even after whitespace-tolerant matching. "
+            f"Add it there before this pipeline can run."
         )
 
-    if dropped:
-        df = df.drop(columns=list(dropped), errors="ignore")
-    return df.rename(columns=field_map)
+    if drop_cols:
+        df = df.drop(columns=drop_cols, errors="ignore")
+    return df.rename(columns=rename)
 
 
 _REGISTRY_PATH = Path(__file__).resolve().parent.parent / "field_registry.json"
