@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-11T11:39:26.762033+00:00",
+  "generated_at": "2026-08-21T18:56:16.706033+00:00",
   "source": "live MongoDB scan, not field_mapping.py's intended mappings",
   "collections": {
     "ds": [
@@ -8,6 +8,7 @@
       "code_art",
       "date_ds",
       "description",
+      "designation_consommation",
       "entite_nom",
       "fournisseur",
       "immatriculation",
@@ -30,6 +31,7 @@
       "qte"
     ],
     "cp": [
+      "client",
       "date_debut_contrat",
       "date_fin_contrat",
       "date_mce",
@@ -40,6 +42,7 @@
       "marque",
       "modele",
       "num_chassis",
+      "statut",
       "type_location",
       "type_vh_relais",
       "ww"

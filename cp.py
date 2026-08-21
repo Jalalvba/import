@@ -41,6 +41,8 @@ PIPELINE_NAME = "cp"
 HEADER_ROW = 7
 
 COLUMNS_NEEDED = [
+    "statut",
+    "client",
     "gestionnaire",
     "ww",
     "imm",

@@ -275,6 +275,24 @@ persistent `.env` entry — set it inline for a single invocation
 check. See [Skip-if-unchanged](#skip-if-unchanged-pipeline_state-collection)
 above.
 
+`PIPELINE_ALLOW_NEW_FIELDS` is likewise ephemeral and never belongs in
+`.env`. It exists for one unavoidable bootstrap case: adding a field to a
+pipeline's `COLUMNS_NEEDED` for the first time always fails
+`validate_against_registry()`, because `field_registry.json` only lists
+fields real documents already carry, and the only thing that can ever put
+the new field there is the very run the check is blocking. Name the exact
+clean field names being introduced, run that pipeline once, then
+regenerate the registry — after which the field verifies normally and the
+variable must not be used again:
+
+```bash
+PIPELINE_ALLOW_NEW_FIELDS=statut,client PIPELINE_FORCE_RUN=1 python3 cp.py
+python3 scripts/export_field_registry.py
+```
+
+It excuses only the names spelled out in it, so a typo elsewhere in
+`COLUMNS_NEEDED` still raises during the same bootstrap run.
+
 ## field_registry.json — regenerate whenever real Mongo field names change
 
 `field_registry.json` (repo root) is a **live scan** of the exact, distinct
@@ -292,6 +310,8 @@ whenever:**
 - `scripts/migrate_field_names.py --execute` actually backfills a collection
   (dirty keys become clean keys on real documents).
 - Any `FIELD_MAPS` entry in `lib/field_mapping.py` changes.
+- A pipeline's `COLUMNS_NEEDED` gains a field, so a previously-unwritten
+  field now reaches Mongo (see `PIPELINE_ALLOW_NEW_FIELDS` above).
 - Any other manual migration/write adds, renames, or removes a field on
   `ds`/`cp`/`parc`/`bc`.
 

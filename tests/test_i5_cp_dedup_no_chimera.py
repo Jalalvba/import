@@ -19,6 +19,8 @@ def test_dedup_keeps_representative_rows_own_end_date_not_a_later_row():
     # across the whole group) -- producing a contract with a start/end
     # date pair that never occurred together in the source data.
     df = pd.DataFrame({
+        "Statut": ["Livré", "Arret facturation"],
+        "Client": ["CLIENT-A", "CLIENT-B"],
         "Gestionnaire": ["G1", "G1"],
         "WW": ["WW123", "WW123"],
         "IMM": ["AB-123-CD", "WW123"],

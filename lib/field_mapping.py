@@ -20,6 +20,7 @@ trusting FIELD_MAPS on faith.
 
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,26 @@ def validate_against_registry(collection: str, columns_needed: list[str]) -> Non
     most FIELD_MAPS entries are for columns no pipeline currently selects
     into Mongo, so field_registry.json -- which only ever contains
     fields a document actually has -- can never confirm or deny them.
+
+    Bootstrapping a genuinely NEW field: PIPELINE_ALLOW_NEW_FIELDS is an
+    ephemeral, per-invocation escape hatch (like PIPELINE_FORCE_RUN --
+    never a persistent .env entry) for the one unavoidable chicken-and-egg
+    case. Adding a field to a pipeline's COLUMNS_NEEDED for the first time
+    always fails this check: the field is in neither its clean nor its
+    dirty form in the registry, because no document has ever carried it
+    and the registry is a live scan of what documents actually have. The
+    only way it can ever appear is for the pipeline to run once and write
+    it. Set the variable to a comma-separated list of the exact clean
+    field names being introduced, run that pipeline once, then regenerate
+    field_registry.json (scripts/export_field_registry.py) -- from then on
+    the field verifies normally and the variable must not be used again.
+
+        PIPELINE_ALLOW_NEW_FIELDS=statut,client python3 cp.py
+
+    Deliberately NOT a blanket on/off switch: it only excuses the exact
+    field names spelled out in it, so a typo elsewhere in COLUMNS_NEEDED
+    still raises during the same bootstrap run rather than being waved
+    through alongside the intended new fields.
     """
     if not _REGISTRY_PATH.exists():
         raise FileNotFoundError(
@@ -390,8 +411,23 @@ def validate_against_registry(collection: str, columns_needed: list[str]) -> Non
     field_map = FIELD_MAPS[collection]
     clean_to_dirty = {clean: dirty for dirty, clean in field_map.items()}
 
+    allow_new = {
+        f.strip()
+        for f in os.getenv("PIPELINE_ALLOW_NEW_FIELDS", "").split(",")
+        if f.strip()
+    }
+
     unverified = []
     for clean in columns_needed:
+        if clean in allow_new and clean not in live_fields:
+            logger.warning(
+                "[%s] field_registry: %r allowed as a NEW field via "
+                "PIPELINE_ALLOW_NEW_FIELDS -- it is not in field_registry.json "
+                "yet. Re-run scripts/export_field_registry.py after this run so "
+                "it verifies normally from now on.",
+                collection, clean,
+            )
+            continue
         dirty = clean_to_dirty.get(clean)
         if dirty is None:
             unverified.append((clean, None))

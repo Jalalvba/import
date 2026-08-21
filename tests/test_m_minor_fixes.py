@@ -18,6 +18,8 @@ def test_cp_dedup_tiebreak_is_deterministic_via_chassis():
     # Same WW, neither row has a real IMM, same end date -- the only
     # remaining tiebreak should be NUM chassis (lexicographically first).
     df = pd.DataFrame({
+        "Statut": ["Livré", "Arret facturation"],
+        "Client": ["CLIENT-A", "CLIENT-B"],
         "Gestionnaire": ["G1", "G1"],
         "WW": ["WW999", "WW999"],
         "IMM": ["WW999", "WW999"],  # neither is a "real" IMM
