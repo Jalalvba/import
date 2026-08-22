@@ -45,6 +45,7 @@ COLUMNS_NEEDED = [
     "date_mce",
     "type_location",
     "locataire",
+    "societe",
 ]
 
 DATE_COLUMNS = ["date_mce"]

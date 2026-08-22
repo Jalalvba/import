@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-21T18:56:16.706033+00:00",
+  "generated_at": "2026-08-22T23:32:25.336791+00:00",
   "source": "live MongoDB scan, not field_mapping.py's intended mappings",
   "collections": {
     "ds": [
@@ -57,6 +57,7 @@
       "modele",
       "n_de_chassis",
       "numero_ww",
+      "societe",
       "type_location"
     ]
   }
